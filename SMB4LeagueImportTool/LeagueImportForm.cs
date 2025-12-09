@@ -331,14 +331,31 @@ namespace SMB4LeagueImportTool
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this,
-                    "An error occurred while saving changes to master.sav:\n\n" + ex.Message,
-                    "Save Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-            }
+                if (ex is TypeInitializationException tie &&
+                    tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
+                {
+                    MessageBox.Show(this,
+                        "The SQLite engine the tool uses failed to initialize.\n\n" +
+                        "This usually happens when the EXE is run directly from inside the ZIP, " +
+                        "or moved without the other files it shipped with.\n\n" +
+                        "Please extract the ZIP to a folder and run the tool from there, " +
+                        "without moving the EXE on its own.",
+                        "SQLite Initialization Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
         }
-        private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e)
+                else
+                {
+                    MessageBox.Show(this,
+                        "An error occurred while saving changes to master.sav:\n\n" + ex.Message,
+                        "Save Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+        }
+    }
+
+}
+private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e)
         {
             CleanupTempFolder();
         }
@@ -383,11 +400,27 @@ namespace SMB4LeagueImportTool
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this,
-                    $"An error occurred while loading your leagues and franchises:\n\n{ex.Message}",
-                    "Error Loading Data",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                if (ex is TypeInitializationException tie &&
+                    tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
+                {
+                    MessageBox.Show(this,
+                        "The SQLite engine the tool uses failed to initialize.\n\n" +
+                        "This usually happens when the EXE is run directly from inside the ZIP, " +
+                        "or moved without the other files it shipped with.\n\n" +
+                        "Please extract the ZIP to a folder and run the tool from there, " +
+                        "without moving the EXE on its own.",
+                        "SQLite Initialization Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+                else
+                {
+                    MessageBox.Show(this,
+                        $"An error occurred while loading your leagues and franchises:\n\n{ex.Message}",
+                        "Error Loading Data",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
             }
         }
 
