@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using Microsoft.Data.Sqlite;
 using System.IO;
 using System.Windows.Forms;
+using System.Text;
 
 namespace SMB4LeagueImportTool
 {
@@ -480,6 +481,9 @@ private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e
 
             var registeredGuids = new List<string>();
             var leagueInfos = new Dictionary<string, LeagueRowInfo>(StringComparer.OrdinalIgnoreCase);
+            // ElectricFrost Fix: track any league-*.sav files we normalize
+            var renamedSaves = new List<(string OldName, string NewName, string LeagueName)>();
+
 
             using (var savManager = new SavManager(savesFolderPath))
             {
@@ -509,8 +513,10 @@ private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e
                 }
 
                 // --- Scan each league-*.sav file for name/guid/type ---
-                foreach (var leagueSavPath in leagueSaveFiles)
+                foreach (var originalLeagueSavPath in leagueSaveFiles)
                 {
+                    // Local copy so we can update if the file gets renamed (ElectricFrost Fix)
+                    string leagueSavPath = originalLeagueSavPath;
                     string fileName = Path.GetFileName(leagueSavPath);
                     string tempSqlitePath;
 
@@ -553,6 +559,54 @@ private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e
                                 if (!reader.IsDBNull(1))
                                     displayName = reader.GetString(1);
                             }
+                        }
+
+                        // ----------------------------
+                        // ElectricFrost Fix:
+                        // Auto-rename league files when filename GUID != internal GUID
+                        // ----------------------------
+                        try
+                        {
+                            if (!string.IsNullOrEmpty(rawGuid))
+                            {
+                                // GUID from filename (if it looks like league-<guid>.sav)
+                                string fileGuid = null;
+                                string baseName = Path.GetFileNameWithoutExtension(fileName);
+
+                                if (baseName.StartsWith("league-", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    string guidPart = baseName.Substring("league-".Length).Replace("-", "");
+                                    if (guidPart.Length == 32)
+                                        fileGuid = guidPart.ToUpperInvariant();
+                                }
+
+                                // If we have both and they differ, rename file to match internal GUID
+                                if (!string.IsNullOrEmpty(fileGuid) &&
+                                    !string.Equals(rawGuid, fileGuid, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    string newFileName = "league-" + FormatGuidWithDashes(rawGuid) + ".sav";
+                                    string newPath = Path.Combine(Path.GetDirectoryName(leagueSavPath)!, newFileName);
+
+                                    // If something already exists with the target name, back it up
+                                    if (File.Exists(newPath))
+                                    {
+                                        string backupPath = newPath + ".bak";
+                                        File.Move(newPath, backupPath, true);
+                                    }
+
+                                    File.Move(leagueSavPath, newPath);
+
+                                    // Update our local variables so the rest of the pipeline uses the new name
+                                    leagueSavPath = newPath;
+                                    fileName = Path.GetFileName(newPath);
+                                    // Record rename for post-load dialog (ElectricFrost Fix)
+                                    renamedSaves.Add((Path.GetFileName(originalLeagueSavPath), fileName, displayName));
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // If anything goes wrong, fail silently — this is a non-critical normalization step
                         }
 
                         // Detect franchise via t_franchise_seasons
@@ -713,6 +767,29 @@ private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e
             _isDataLoaded = true;
             _hasUnsavedChanges = false;
             UpdateUiState();
+            // ElectricFrost Fix: let the user know if any saves were renamed
+            if (renamedSaves.Count > 0)
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("One or more league save files had filenames that didn't match");
+                sb.AppendLine("their internal IDs. The tool normalized them so the game and");
+                sb.AppendLine("other tools can recognize them reliably.\n");
+                sb.AppendLine("Renamed saves:");
+                sb.AppendLine();
+
+                // Sort for polish and consistency
+                foreach (var (OldName, NewName, LeagueName) in renamedSaves.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"{OldName} → {NewName}   ({LeagueName})");
+                }
+
+                MessageBox.Show(
+                    this,
+                    sb.ToString(),
+                    "League Save Filenames Normalized",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
         }
 
         private void DGVLeagues_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
