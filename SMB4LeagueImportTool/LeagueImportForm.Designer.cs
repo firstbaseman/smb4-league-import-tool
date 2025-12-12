@@ -47,6 +47,7 @@
             QuitButton = new Button();
             statusStrip1 = new StatusStrip();
             LeagueImportToolStatusLabel = new ToolStripStatusLabel();
+            OpenSavesFolderButton = new Button();
             DGVLeaguePanel.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)DGVLeagues).BeginInit();
             UpperPanel.SuspendLayout();
@@ -60,7 +61,7 @@
             DGVLeaguePanel.Controls.Add(DGVLeagues);
             DGVLeaguePanel.Location = new Point(0, 70);
             DGVLeaguePanel.Name = "DGVLeaguePanel";
-            DGVLeaguePanel.Size = new Size(805, 350);
+            DGVLeaguePanel.Size = new Size(805, 372);
             DGVLeaguePanel.TabIndex = 0;
             // 
             // DGVLeagues
@@ -82,7 +83,7 @@
             DGVLeagues.Name = "DGVLeagues";
             DGVLeagues.RowHeadersVisible = false;
             DGVLeagues.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-            DGVLeagues.Size = new Size(805, 350);
+            DGVLeagues.Size = new Size(805, 372);
             DGVLeagues.TabIndex = 1;
             // 
             // ColRegistered
@@ -135,9 +136,9 @@
             // 
             // UpperPanel
             // 
+            UpperPanel.Controls.Add(OpenSavesFolderButton);
             UpperPanel.Controls.Add(SavesFolderPathLabel);
             UpperPanel.Controls.Add(SelectSavePathButton);
-            UpperPanel.Controls.Add(LoadLeaguesFranchisesButton);
             UpperPanel.Controls.Add(AboutButton);
             UpperPanel.Dock = DockStyle.Top;
             UpperPanel.Location = new Point(0, 0);
@@ -166,7 +167,8 @@
             // 
             // LoadLeaguesFranchisesButton
             // 
-            LoadLeaguesFranchisesButton.Location = new Point(12, 41);
+            LoadLeaguesFranchisesButton.Anchor = AnchorStyles.Bottom | AnchorStyles.Left;
+            LoadLeaguesFranchisesButton.Location = new Point(12, 25);
             LoadLeaguesFranchisesButton.Name = "LoadLeaguesFranchisesButton";
             LoadLeaguesFranchisesButton.Size = new Size(189, 23);
             LoadLeaguesFranchisesButton.TabIndex = 2;
@@ -187,10 +189,11 @@
             // 
             BottomPanel.Controls.Add(ExportSaveButton);
             BottomPanel.Controls.Add(SaveChangesButton);
+            BottomPanel.Controls.Add(LoadLeaguesFranchisesButton);
             BottomPanel.Controls.Add(QuitButton);
             BottomPanel.Controls.Add(statusStrip1);
             BottomPanel.Dock = DockStyle.Bottom;
-            BottomPanel.Location = new Point(0, 401);
+            BottomPanel.Location = new Point(0, 423);
             BottomPanel.Name = "BottomPanel";
             BottomPanel.Size = new Size(804, 104);
             BottomPanel.TabIndex = 2;
@@ -242,11 +245,21 @@
             LeagueImportToolStatusLabel.Size = new Size(41, 17);
             LeagueImportToolStatusLabel.Text = "Ready";
             // 
+            // OpenSavesFolderButton
+            // 
+            OpenSavesFolderButton.Location = new Point(12, 42);
+            OpenSavesFolderButton.Name = "OpenSavesFolderButton";
+            OpenSavesFolderButton.Size = new Size(189, 23);
+            OpenSavesFolderButton.TabIndex = 5;
+            OpenSavesFolderButton.Text = "Open Saves Folder";
+            OpenSavesFolderButton.UseVisualStyleBackColor = true;
+            OpenSavesFolderButton.Click += OpenSavesFolderButton_Click;
+            // 
             // LeagueImportForm
             // 
             AutoScaleDimensions = new SizeF(7F, 15F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(804, 505);
+            ClientSize = new Size(804, 527);
             Controls.Add(UpperPanel);
             Controls.Add(DGVLeaguePanel);
             Controls.Add(BottomPanel);
@@ -283,5 +296,6 @@
         private DataGridViewTextBoxColumn ColLeagueFranchiseName;
         private DataGridViewTextBoxColumn ColGUID;
         private DataGridViewTextBoxColumn ColFileName;
+        private Button OpenSavesFolderButton;
     }
 }

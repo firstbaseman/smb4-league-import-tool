@@ -1,13 +1,15 @@
 ﻿// SMB4 League Import Tool - LeagueImportForm
 // Handles reading/writing league registrations between master.sav and league-*.sav files.
 // Uses zlib-compressed SQLite saves and classifies entries as Default / Custom / Franchise.
+using Microsoft.Data.Sqlite;
 using SMB4LeagueImportTool.Core;
 using System;
 using System.Collections.Generic;
-using Microsoft.Data.Sqlite;
+using System.Diagnostics;
 using System.IO;
-using System.Windows.Forms;
 using System.Text;
+using System.Diagnostics;
+using System.Windows.Forms;
 
 namespace SMB4LeagueImportTool
 {
@@ -168,6 +170,24 @@ namespace SMB4LeagueImportTool
             LoadLeaguesFranchisesButton.Enabled = true;
             _isDataLoaded = false;   // Path is good, but we haven't loaded leagues yet
             UpdateUiState();
+        }
+        private void OpenSavesFolderButton_Click(object sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(_savesFolderPath) || !Directory.Exists(_savesFolderPath))
+            {
+                MessageBox.Show(this,
+                    "Please select a valid SMB4 saves folder first.",
+                    "No Saves Folder",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _savesFolderPath,
+                UseShellExecute = true
+            });
         }
         // Workflow for Save Changes:
         // 1. Validate that every registered non-default row has a backing league-*.sav file.
@@ -344,7 +364,7 @@ namespace SMB4LeagueImportTool
                         "SQLite Initialization Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);
-        }
+                }
                 else
                 {
                     MessageBox.Show(this,
@@ -352,11 +372,11 @@ namespace SMB4LeagueImportTool
                         "Save Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);
-        }
-    }
+                }
+            }
 
-}
-private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e)
+        }
+        private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e)
         {
             CleanupTempFolder();
         }
