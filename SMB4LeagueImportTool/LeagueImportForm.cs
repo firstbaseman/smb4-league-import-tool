@@ -18,6 +18,7 @@ namespace SMB4LeagueImportTool
         private bool _isDataLoaded;
         private bool _hasUnsavedChanges;
         private int _initialRegisteredCount;
+        private bool _steamCloudWarningShown;
 
         // Raw hex (no dashes) as stored in t_league_savedatas.GUID
         private static readonly string[] DefaultLeagueGuidsRaw =
@@ -94,6 +95,7 @@ namespace SMB4LeagueImportTool
 
             // Valid last-used saves folder
             _savesFolderPath = last;
+            MaybeWarnSteamCloud(_savesFolderPath);
             SavesFolderPathLabel.Text = last;
             LeagueImportToolStatusLabel.Text = "Previous folder loaded, let's begin";
             LoadLeaguesFranchisesButton.Enabled = true;
@@ -159,6 +161,7 @@ namespace SMB4LeagueImportTool
             }
 
             _savesFolderPath = selectedPath;
+            MaybeWarnSteamCloud(_savesFolderPath);
             SavesFolderPathLabel.Text = selectedPath;
             LeagueImportToolStatusLabel.Text =
                 "Saves folder selected. Click on \"Load All League/Franchise Saves\" to get started.";
@@ -835,6 +838,39 @@ namespace SMB4LeagueImportTool
         }
 
         // -------------------- helpers --------------------
+
+        private static bool IsSteamCloudDetected(string savesFolderPath)
+        {
+            // Steam Cloud marker file (AutoCloud)
+            string autoCloudPath = Path.Combine(savesFolderPath, "steam_autocloud.vdf");
+            return File.Exists(autoCloudPath);
+        }
+
+        private void MaybeWarnSteamCloud(string savesFolderPath)
+        {
+            if (_steamCloudWarningShown)
+                return;
+
+            if (string.IsNullOrWhiteSpace(savesFolderPath) || !Directory.Exists(savesFolderPath))
+                return;
+
+            if (!IsSteamCloudDetected(savesFolderPath))
+                return;
+
+            _steamCloudWarningShown = true;
+
+            MessageBox.Show(
+                this,
+                "Steam Cloud appears to be enabled for Super Mega Baseball 4.\n\n" +
+                "If Steam Cloud syncs after you edit/register saves, your changes may be overwritten by the cloud saves.\n\n" +
+                "Recommended:\n" +
+                "• Disable Steam Cloud for SMB4 while using this tool, or\n" +
+                "• Back up your saves first.",
+                "Steam Cloud Detected",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning
+            );
+        }
 
         private static string FormatGuidWithDashes(string rawHex)
         {
