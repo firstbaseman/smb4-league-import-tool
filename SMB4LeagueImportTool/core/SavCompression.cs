@@ -12,8 +12,8 @@ namespace SMB4LeagueImportTool.Core
         // Decompresses a zlib-compressed .sav file into a plain .sqlite file.
         public static void DecompressSavToFile(string savPath, string sqlitePath)
         {
-            if (savPath == null) throw new ArgumentNullException(nameof(savPath));
-            if (sqlitePath == null) throw new ArgumentNullException(nameof(sqlitePath));
+            ArgumentNullException.ThrowIfNull(savPath);
+            ArgumentNullException.ThrowIfNull(sqlitePath);
             if (!File.Exists(savPath))
                 throw new FileNotFoundException("SAV file not found.", savPath);
 
@@ -28,8 +28,8 @@ namespace SMB4LeagueImportTool.Core
         // Compresses a plain .sqlite file into a zlib-compressed .sav file.
         public static void CompressSqliteToSav(string sqlitePath, string savPath)
         {
-            if (sqlitePath == null) throw new ArgumentNullException(nameof(sqlitePath));
-            if (savPath == null) throw new ArgumentNullException(nameof(savPath));
+            ArgumentNullException.ThrowIfNull(savPath);
+            ArgumentNullException.ThrowIfNull(sqlitePath);
             if (!File.Exists(sqlitePath))
                 throw new FileNotFoundException("SQLite file not found.", sqlitePath);
 

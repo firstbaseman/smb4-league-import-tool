@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace SMB4LeagueImportTool
@@ -19,6 +20,7 @@ namespace SMB4LeagueImportTool
         private bool _hasUnsavedChanges;
         private int _initialRegisteredCount;
         private bool _steamCloudWarningShown;
+        private HashSet<string> _initialRegisteredGuids = new(StringComparer.OrdinalIgnoreCase);
 
         // Raw hex (no dashes) as stored in t_league_savedatas.GUID
         private static readonly string[] DefaultLeagueGuidsRaw =
@@ -57,6 +59,7 @@ namespace SMB4LeagueImportTool
             ExportSaveButton.Click += ExportSaveButton_Click;
             AboutButton.Click += AboutButton_Click;
             QuitButton.Click += QuitButton_Click;
+            OpenSavesFolderButton.Click += OpenSavesFolderButton_Click;
 
             DGVLeagues.CurrentCellDirtyStateChanged += DGVLeagues_CurrentCellDirtyStateChanged;
             DGVLeagues.CellValueChanged += DGVLeagues_CellValueChanged;
@@ -175,7 +178,7 @@ namespace SMB4LeagueImportTool
             _isDataLoaded = false;   // Path is good, but we haven't loaded leagues yet
             UpdateUiState();
         }
-        private void OpenSavesFolderButton_Click(object sender, EventArgs e)
+        private void OpenSavesFolderButton_Click(object? sender, EventArgs e)
         {
             if (string.IsNullOrWhiteSpace(_savesFolderPath) || !Directory.Exists(_savesFolderPath))
             {
@@ -218,30 +221,22 @@ namespace SMB4LeagueImportTool
 
             foreach (DataGridViewRow row in DGVLeagues.Rows)
             {
-                if (row.IsNewRow)
-                    continue;
+                if (row.IsNewRow || row.Tag is not LeagueRowInfo info) continue;
 
                 bool isRegistered = row.Cells[ColRegistered.Index].Value is bool b && b;
-                if (!isRegistered)
-                    continue;
+                if (!isRegistered) continue;
 
-                if (row.Tag is not LeagueRowInfo info)
-                    continue;
-
-                // Default leagues do NOT require external save files
-                if (IsDefaultLeagueGuidRaw(info.RawGuidHex))
-                    continue;
-
-                // For non-defaults, ensure save file exists
-                if (string.IsNullOrWhiteSpace(info.SaveFileName))
+                if (!IsDefaultLeagueGuidRaw(info.RawGuidHex))
                 {
-                    missingSaveFiles.Add(info.Name);
-                    continue;
+                    if (string.IsNullOrWhiteSpace(info.SaveFileName) ||
+                        !File.Exists(Path.Combine(_savesFolderPath, info.SaveFileName)))
+                    {
+                        missingSaveFiles.Add(info.Name);
+                    }
                 }
 
-                string expectedPath = Path.Combine(_savesFolderPath, info.SaveFileName);
-                if (!File.Exists(expectedPath))
-                    missingSaveFiles.Add(info.Name);
+                if (!string.IsNullOrWhiteSpace(info.RawGuidHex))
+                    newRegisteredGuids.Add(info.RawGuidHex.ToUpperInvariant());
             }
 
             if (missingSaveFiles.Count > 0)
@@ -261,27 +256,9 @@ namespace SMB4LeagueImportTool
                     return;
             }
 
-            foreach (DataGridViewRow row in DGVLeagues.Rows)
-            {
-                if (row.IsNewRow)
-                    continue;
-
-                bool isRegistered = row.Cells[ColRegistered.Index].Value is bool b && b;
-                if (!isRegistered)
-                    continue;
-
-                if (row.Tag is not LeagueRowInfo info)
-                    continue;
-
-                if (string.IsNullOrWhiteSpace(info.RawGuidHex))
-                    continue;
-
-                newRegisteredGuids.Add(info.RawGuidHex.ToUpperInvariant());
-            }
-
             int newRegisteredCount = newRegisteredGuids.Count;
 
-            if (!_hasUnsavedChanges && newRegisteredCount == _initialRegisteredCount)
+            if (!_hasUnsavedChanges && _initialRegisteredGuids.SetEquals(newRegisteredGuids))
             {
                 MessageBox.Show(this,
                     "There are no changes to save.",
@@ -356,20 +333,7 @@ namespace SMB4LeagueImportTool
             }
             catch (Exception ex)
             {
-                if (ex is TypeInitializationException tie &&
-                    tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
-                {
-                    MessageBox.Show(this,
-                        "The SQLite engine the tool uses failed to initialize.\n\n" +
-                        "This usually happens when the EXE is run directly from inside the ZIP, " +
-                        "or moved without the other files it shipped with.\n\n" +
-                        "Please extract the ZIP to a folder and run the tool from there, " +
-                        "without moving the EXE on its own.",
-                        "SQLite Initialization Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                }
-                else
+                if (!TryHandleSqliteInitError(ex))
                 {
                     MessageBox.Show(this,
                         "An error occurred while saving changes to master.sav:\n\n" + ex.Message,
@@ -425,20 +389,7 @@ namespace SMB4LeagueImportTool
             }
             catch (Exception ex)
             {
-                if (ex is TypeInitializationException tie &&
-                    tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
-                {
-                    MessageBox.Show(this,
-                        "The SQLite engine the tool uses failed to initialize.\n\n" +
-                        "This usually happens when the EXE is run directly from inside the ZIP, " +
-                        "or moved without the other files it shipped with.\n\n" +
-                        "Please extract the ZIP to a folder and run the tool from there, " +
-                        "without moving the EXE on its own.",
-                        "SQLite Initialization Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                }
-                else
+                if (!TryHandleSqliteInitError(ex))
                 {
                     MessageBox.Show(this,
                         $"An error occurred while loading your leagues and franchises:\n\n{ex.Message}",
@@ -507,6 +458,7 @@ namespace SMB4LeagueImportTool
             var leagueInfos = new Dictionary<string, LeagueRowInfo>(StringComparer.OrdinalIgnoreCase);
             // ElectricFrost Fix: track any league-*.sav files we normalize
             var renamedSaves = new List<(string OldName, string NewName, string LeagueName)>();
+            var failedRenames = new List<(string FileName, string Reason)>();
 
 
             using (var savManager = new SavManager(savesFolderPath))
@@ -594,7 +546,7 @@ namespace SMB4LeagueImportTool
                             if (!string.IsNullOrEmpty(rawGuid))
                             {
                                 // GUID from filename (if it looks like league-<guid>.sav)
-                                string fileGuid = null;
+                                string? fileGuid = null;
                                 string baseName = Path.GetFileNameWithoutExtension(fileName);
 
                                 if (baseName.StartsWith("league-", StringComparison.OrdinalIgnoreCase))
@@ -628,9 +580,9 @@ namespace SMB4LeagueImportTool
                                 }
                             }
                         }
-                        catch
+                        catch (Exception ex)
                         {
-                            // If anything goes wrong, fail silently — this is a non-critical normalization step
+                            failedRenames.Add((Path.GetFileName(originalLeagueSavPath), ex.Message));
                         }
 
                         // Detect franchise via t_franchise_seasons
@@ -708,9 +660,6 @@ namespace SMB4LeagueImportTool
                     continue;
 
                 var info = kvp.Value;
-                if (!info.IsRegistered)
-                    info.IsRegistered = false;
-
                 allInfos.Add(info);
             }
 
@@ -767,6 +716,10 @@ namespace SMB4LeagueImportTool
                 registeredDefaults.Count +
                 registeredCustoms.Count +
                 registeredFranchises.Count;
+            _initialRegisteredGuids = new HashSet<string>(
+    registeredDefaults.Concat(registeredCustoms).Concat(registeredFranchises)
+        .Select(i => i.RawGuidHex),
+    StringComparer.OrdinalIgnoreCase);
 
             // --- Populate the grid in the desired order ---
 
@@ -813,6 +766,26 @@ namespace SMB4LeagueImportTool
                     "League Save Filenames Normalized",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
+            }
+            if (failedRenames.Count > 0)
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("One or more league save files could not be renamed to match their internal IDs.");
+                sb.AppendLine("These files were loaded as-is and may not register correctly.\n");
+                sb.AppendLine("Failed renames:");
+                sb.AppendLine();
+
+                foreach (var (FileName, Reason) in failedRenames.OrderBy(r => r.FileName, StringComparer.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"{FileName}: {Reason}");
+                }
+
+                MessageBox.Show(
+                    this,
+                    sb.ToString(),
+                    "League Save Rename Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
             }
         }
 
@@ -873,6 +846,24 @@ namespace SMB4LeagueImportTool
                 MessageBoxIcon.Warning
             );
         }
+        private bool TryHandleSqliteInitError(Exception ex)
+        {
+            if (ex is TypeInitializationException tie &&
+                tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
+            {
+                MessageBox.Show(this,
+                    "The SQLite engine the tool uses failed to initialize.\n\n" +
+                    "This usually happens when the EXE is run directly from inside the ZIP, " +
+                    "or moved without the other files it shipped with.\n\n" +
+                    "Please extract the ZIP to a folder and run the tool from there, " +
+                    "without moving the EXE on its own.",
+                    "SQLite Initialization Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return true;
+            }
+            return false;
+        }
 
         private static string FormatGuidWithDashes(string rawHex)
         {
@@ -904,13 +895,7 @@ namespace SMB4LeagueImportTool
             if (cleaned.Length % 2 != 0)
                 throw new ArgumentException("Hex string has an invalid length.", nameof(hex));
 
-            var bytes = new byte[cleaned.Length / 2];
-            for (int i = 0; i < bytes.Length; i++)
-            {
-                bytes[i] = Convert.ToByte(cleaned.Substring(i * 2, 2), 16);
-            }
-
-            return bytes;
+            return Convert.FromHexString(cleaned);
         }
         private static bool IsDefaultLeagueGuidRaw(string rawHex)
         {
