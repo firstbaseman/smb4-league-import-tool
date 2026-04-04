@@ -12,7 +12,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="assets\icons\app.ico" />
+    <Content Include="Assets\icons\app.ico" />
   </ItemGroup>
 
   <ItemGroup>

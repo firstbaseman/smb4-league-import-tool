@@ -42,6 +42,7 @@
             SelectSavePathButton = new Button();
             SavesFolderPathLabel = new Label();
             AboutButton = new Button();
+            OpenLogsButton = new Button();
             LoadLeaguesFranchisesButton = new Button();
             BottomPanel = new Panel();
             tableLayoutPanelBottom = new TableLayoutPanel();
@@ -159,6 +160,7 @@
             tableLayoutPanelTop.Controls.Add(SelectSavePathButton, 0, 0);
             tableLayoutPanelTop.Controls.Add(SavesFolderPathLabel, 1, 0);
             tableLayoutPanelTop.Controls.Add(AboutButton, 2, 0);
+            tableLayoutPanelTop.Controls.Add(OpenLogsButton, 2, 1);
             tableLayoutPanelTop.Dock = DockStyle.Fill;
             tableLayoutPanelTop.Location = new Point(0, 0);
             tableLayoutPanelTop.Name = "tableLayoutPanelTop";
@@ -207,6 +209,15 @@
             AboutButton.TabIndex = 1;
             AboutButton.Text = "About This Tool";
             AboutButton.UseVisualStyleBackColor = true;
+            // 
+            // OpenLogsButton
+            // 
+            OpenLogsButton.Location = new Point(690, 35);
+            OpenLogsButton.Name = "OpenLogsButton";
+            OpenLogsButton.Size = new Size(111, 23);
+            OpenLogsButton.TabIndex = 6;
+            OpenLogsButton.Text = "Open Logs";
+            OpenLogsButton.UseVisualStyleBackColor = true;
             // 
             // LoadLeaguesFranchisesButton
             // 
@@ -353,5 +364,6 @@
         private TableLayoutPanel tableLayoutPanelTop;
         private FlowLayoutPanel flowLayoutPanelActions;
         private TableLayoutPanel tableLayoutPanelBottom;
+        private Button OpenLogsButton;
     }
 }

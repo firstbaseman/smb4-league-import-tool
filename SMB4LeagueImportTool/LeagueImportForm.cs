@@ -1,14 +1,9 @@
 ﻿// SMB4 League Import Tool - LeagueImportForm
 // Handles reading/writing league registrations between master.sav and league-*.sav files.
 // Uses zlib-compressed SQLite saves and classifies entries as Default / Custom / Franchise.
-using Microsoft.Data.Sqlite;
 using SMB4LeagueImportTool.Core;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
+using SMB4LeagueImportTool.Models;
 using System.Text;
-using System.Windows.Forms;
 
 namespace SMB4LeagueImportTool
 {
@@ -17,33 +12,16 @@ namespace SMB4LeagueImportTool
         private string? _savesFolderPath;
         private bool _isDataLoaded;
         private bool _hasUnsavedChanges;
+        private bool _isUpdatingGrid;
         private int _initialRegisteredCount;
         private bool _steamCloudWarningShown;
-
-        // Raw hex (no dashes) as stored in t_league_savedatas.GUID
-        private static readonly string[] DefaultLeagueGuidsRaw =
-        {
-            "99F30082775B4547ADD88C7D2C94FCE5",
-            "1EE40D82453A474082E50827731C22E0",
-            "7CBC32B9BD7F48D7AE0144C6595CD5A6"
-        };
-        // Flattened view model for a single league/franchise row in the grid.
-        // Backed by data from master.sav (t_league_savedatas) and each league-*.sav file.
-        private sealed class LeagueRowInfo
-        {
-            public string RawGuidHex { get; set; } = string.Empty;
-            public string DisplayGuid { get; set; } = string.Empty;
-            public string Name { get; set; } = string.Empty;
-            public string Type { get; set; } = string.Empty;
-            public bool IsRegistered { get; set; }
-            public string SaveFileName { get; set; } = string.Empty;
-        }
-
+        private HashSet<string> _initialRegisteredGuids = new(StringComparer.OrdinalIgnoreCase);
         public LeagueImportForm()
         {
             InitializeComponent();
+            AppLogger.WriteSessionHeader();
             tableLayoutPanelTop.SetRowSpan(SavesFolderPathLabel, 2);
-            tableLayoutPanelTop.SetRowSpan(AboutButton, 2);
+            tableLayoutPanelTop.SetRowSpan(AboutButton, 1);
 
             // Initial UI text
             this.Text = $"SMB4 League Import Tool {VersionInfo.Version}";
@@ -56,10 +34,11 @@ namespace SMB4LeagueImportTool
             SaveChangesButton.Click += SaveChangesButton_Click;
             ExportSaveButton.Click += ExportSaveButton_Click;
             AboutButton.Click += AboutButton_Click;
-            QuitButton.Click += QuitButton_Click;
+            OpenLogsButton.Click += OpenLogsButton_Click;
 
             DGVLeagues.CurrentCellDirtyStateChanged += DGVLeagues_CurrentCellDirtyStateChanged;
             DGVLeagues.CellValueChanged += DGVLeagues_CellValueChanged;
+            DGVLeagues.DataError += DGVLeagues_DataError;
 
             Load += LeagueImportForm_Load;
             FormClosing += LeagueImportForm_FormClosing;
@@ -72,9 +51,11 @@ namespace SMB4LeagueImportTool
 
         private void UpdateUiState()
         {
-            // Export/Save Changes only valid when data is loaded
             ExportSaveButton.Enabled = _isDataLoaded;
-            SaveChangesButton.Enabled = _isDataLoaded;
+
+            SaveChangesButton.Enabled =
+                _isDataLoaded &&
+                HasPendingRegistrationChanges();
         }
 
         // -------------------- lifecycle --------------------
@@ -82,27 +63,17 @@ namespace SMB4LeagueImportTool
         private void LeagueImportForm_Load(object? sender, EventArgs e)
         {
             var last = Properties.Settings.Default.LastSavesFolder;
-            if (string.IsNullOrWhiteSpace(last) || !Directory.Exists(last))
+
+            if (!Smb4SaveFolderValidator.IsValid(last))
             {
-                // Nothing saved or folder missing; stay in initial state
+                // Nothing saved, folder missing, or not a valid SMB4 saves folder.
                 return;
             }
 
-            var masterSavPath = Path.Combine(last, "master.sav");
-            if (!File.Exists(masterSavPath))
-            {
-                // Folder exists but not a valid SMB4 saves folder
-                return;
-            }
-
-            // Valid last-used saves folder
-            _savesFolderPath = last;
-            MaybeWarnSteamCloud(_savesFolderPath);
-            SavesFolderPathLabel.Text = last;
-            LeagueImportToolStatusLabel.Text = "Previous folder loaded, let's begin";
-            LoadLeaguesFranchisesButton.Enabled = true;
-            _isDataLoaded = false;   // Path is good, but we haven't loaded leagues yet
-            UpdateUiState();
+            ApplySelectedSavesFolder(
+                last,
+                "Previous Folder Loaded. Click on \"Load All League/Franchise Saves\" to get started.",
+                saveAsLastUsedFolder: false);
         }
 
         // -------------------- UI handlers --------------------
@@ -118,7 +89,8 @@ namespace SMB4LeagueImportTool
                 "create multiple leagues yourself, this tool integrates them cleanly " +
                 "into your own save structure.\n\n" +
                 "Developed by Ari: https://github.com/firstbaseman/\n\n" +
-                "Ko-fi Support: https://ko-fi.com/firstbaseman/\n";
+                "Ko-fi Support: https://ko-fi.com/firstbaseman/\n\n" +
+               $"Log file:\n{AppLogger.LogFilePath}\n";
 
             MessageBox.Show(
                 message,
@@ -140,44 +112,31 @@ namespace SMB4LeagueImportTool
 
             var selectedPath = dialog.SelectedPath;
 
-            if (!Directory.Exists(selectedPath))
+            var validation = Smb4SaveFolderValidator.Validate(selectedPath);
+
+            if (!validation.IsValid)
             {
                 MessageBox.Show(this,
-                    "The selected folder does not exist.",
-                    "Folder Not Found",
+                    validation.Message,
+                    "Invalid Saves Folder",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
+
+                LeagueImportToolStatusLabel.Text = validation.StatusText;
                 return;
             }
 
-            var masterSavPath = Path.Combine(selectedPath, "master.sav");
-            if (!File.Exists(masterSavPath))
-            {
-                MessageBox.Show(this,
-                    "The selected folder does not contain master.sav.\n\n" +
-                    "Please select your Super Mega Baseball 4 save folder.",
-                    "master.sav Not Found",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+            if (!ConfirmDiscardUnsavedChanges("select a different saves folder"))
                 return;
-            }
 
-            _savesFolderPath = selectedPath;
-            MaybeWarnSteamCloud(_savesFolderPath);
-            SavesFolderPathLabel.Text = selectedPath;
-            LeagueImportToolStatusLabel.Text =
-                "Saves folder selected. Click on \"Load All League/Franchise Saves\" to get started.";
-
-            Properties.Settings.Default.LastSavesFolder = selectedPath;
-            Properties.Settings.Default.Save();
-
-            LoadLeaguesFranchisesButton.Enabled = true;
-            _isDataLoaded = false;   // Path is good, but we haven't loaded leagues yet
-            UpdateUiState();
+            ApplySelectedSavesFolder(
+                selectedPath,
+                "Saves folder selected. Click on \"Load All League/Franchise Saves\" to get started.",
+                saveAsLastUsedFolder: true);
         }
-        private void OpenSavesFolderButton_Click(object sender, EventArgs e)
+        private void OpenSavesFolderButton_Click(object? sender, EventArgs e)
         {
-            if (string.IsNullOrWhiteSpace(_savesFolderPath) || !Directory.Exists(_savesFolderPath))
+            if (string.IsNullOrWhiteSpace(_savesFolderPath))
             {
                 MessageBox.Show(this,
                     "Please select a valid SMB4 saves folder first.",
@@ -187,17 +146,27 @@ namespace SMB4LeagueImportTool
                 return;
             }
 
-            Process.Start(new ProcessStartInfo
+            try
             {
-                FileName = _savesFolderPath,
-                UseShellExecute = true
-            });
+                ShellFolderOpener.OpenExistingFolder(_savesFolderPath);
+                AppLogger.Info($"Opened saves folder: {_savesFolderPath}");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Failed to open saves folder.", ex);
+
+                MessageBox.Show(this,
+                    "The saves folder could not be opened.\n\n" + ex.Message,
+                    "Open Saves Folder Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
         // Workflow for Save Changes:
         // 1. Validate that every registered non-default row has a backing league-*.sav file.
         // 2. Build the new ordered list of registered GUIDs from the grid.
         // 3. Confirm with the user (before/after counts).
-        // 4. Decompress master.sav, rewrite t_league_savedatas, and repack master.sav.
+        // 4. Ask MasterLeagueRegistry to rewrite t_league_savedatas in master.sav.
 
         private void SaveChangesButton_Click(object? sender, EventArgs e)
         {
@@ -211,165 +180,48 @@ namespace SMB4LeagueImportTool
                 return;
             }
 
-            // Build the new registered GUID list from the grid
-            var newRegisteredGuids = new List<string>();
-            // --- Detect registered leagues whose save files are missing ---
-            var missingSaveFiles = new List<string>();
+            var currentRows = GetCurrentGridLeagueRows();
 
-            foreach (DataGridViewRow row in DGVLeagues.Rows)
+            var changePlan = LeagueRegistrationChangePlanner.BuildPlan(
+                currentRows,
+                _initialRegisteredGuids);
+
+            var newRegisteredGuids = changePlan.NewRegisteredGuids;
+            var missingCheckedSaves = changePlan.MissingCheckedSaves;
+            int newRegisteredCount = changePlan.NewRegisteredCount;
+
+            if (!changePlan.HasChanges)
             {
-                if (row.IsNewRow)
-                    continue;
-
-                bool isRegistered = row.Cells[ColRegistered.Index].Value is bool b && b;
-                if (!isRegistered)
-                    continue;
-
-                if (row.Tag is not LeagueRowInfo info)
-                    continue;
-
-                // Default leagues do NOT require external save files
-                if (IsDefaultLeagueGuidRaw(info.RawGuidHex))
-                    continue;
-
-                // For non-defaults, ensure save file exists
-                if (string.IsNullOrWhiteSpace(info.SaveFileName))
-                {
-                    missingSaveFiles.Add(info.Name);
-                    continue;
-                }
-
-                string expectedPath = Path.Combine(_savesFolderPath, info.SaveFileName);
-                if (!File.Exists(expectedPath))
-                    missingSaveFiles.Add(info.Name);
-            }
-
-            if (missingSaveFiles.Count > 0)
-            {
-                string list = string.Join("\n", missingSaveFiles);
-
-                var warn = MessageBox.Show(this,
-                    "Warning: The following registered leagues/franchises do not have corresponding save files:\n\n" +
-                    list +
-                    "\n\nRegistering missing saves may cause issues in-game since there is no linked reference.\n\n" +
-                    "Would you like to continue?",
-                    "Missing Save Files",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning);
-
-                if (warn != DialogResult.Yes)
-                    return;
-            }
-
-            foreach (DataGridViewRow row in DGVLeagues.Rows)
-            {
-                if (row.IsNewRow)
-                    continue;
-
-                bool isRegistered = row.Cells[ColRegistered.Index].Value is bool b && b;
-                if (!isRegistered)
-                    continue;
-
-                if (row.Tag is not LeagueRowInfo info)
-                    continue;
-
-                if (string.IsNullOrWhiteSpace(info.RawGuidHex))
-                    continue;
-
-                newRegisteredGuids.Add(info.RawGuidHex.ToUpperInvariant());
-            }
-
-            int newRegisteredCount = newRegisteredGuids.Count;
-
-            if (!_hasUnsavedChanges && newRegisteredCount == _initialRegisteredCount)
-            {
-                MessageBox.Show(this,
-                    "There are no changes to save.",
-                    "No Changes",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                ShowNoChangesToSaveMessage();
                 return;
             }
 
-            var confirm = MessageBox.Show(this,
-                "You are about to update your master.sav file.\n\n" +
-                $"Registered Leagues/Franchises Before: {_initialRegisteredCount}\n" +
-                $"Registered Leagues/Franchises After:  {newRegisteredCount}\n\n" +
-                "Would you like to continue?",
-                "Confirm Save Changes",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
-
-            if (confirm != DialogResult.Yes)
+            if (ShowMissingCheckedSavesWarningIfNeeded(missingCheckedSaves))
                 return;
+
+            if (!ConfirmSaveChanges(newRegisteredCount))
+                return;
+
+            AppLogger.Info(
+                $"Save confirmed. Registered before={_initialRegisteredCount}, after={newRegisteredCount}.");
 
             try
             {
-                string masterSavPath = Path.Combine(_savesFolderPath, "master.sav");
+                MasterLeagueRegistry.RewriteRegisteredGuids(
+                    _savesFolderPath,
+                    newRegisteredGuids);
 
-                using var savManager = new SavManager(_savesFolderPath);
-                string tempSqlitePath = savManager.DecompressSavToTemp(masterSavPath);
+                AppLogger.Info("Save operation completed successfully.");
 
-                using (var conn = new SqliteConnection(
-                           $"Data Source={tempSqlitePath};Pooling=False;"))
-                {
-                    conn.Open();
-                    using var tx = conn.BeginTransaction();
-
-                    // Blow away existing rows and rewrite from our list in grid order
-                    using (var deleteCmd = conn.CreateCommand())
-                    {
-                        deleteCmd.CommandText = "DELETE FROM t_league_savedatas;";
-                        deleteCmd.Transaction = tx;
-                        deleteCmd.ExecuteNonQuery();
-                    }
-
-                    using (var insertCmd = conn.CreateCommand())
-                    {
-                        insertCmd.CommandText =
-                            "INSERT INTO t_league_savedatas (GUID, isMissing) VALUES (@guid, 0);";
-                        insertCmd.Transaction = tx;
-
-                        var guidParam = insertCmd.CreateParameter();
-                        guidParam.ParameterName = "@guid";
-                        guidParam.SqliteType = SqliteType.Blob;
-                        insertCmd.Parameters.Add(guidParam);
-
-                        foreach (var rawHex in newRegisteredGuids)
-                        {
-                            guidParam.Value = HexToBytes(rawHex);
-                            insertCmd.ExecuteNonQuery();
-                        }
-                    }
-
-                    tx.Commit();
-                }
-
-                // Ensure no pooled connections are still holding the temp .sqlite file
-                SqliteConnection.ClearAllPools();
-
-                savManager.RepackTempSqliteToSav(tempSqlitePath, masterSavPath);
-
-                _initialRegisteredCount = newRegisteredCount;
-                _hasUnsavedChanges = false;
-                LeagueImportToolStatusLabel.Text = "Saved changes successfully.";
+                ApplySuccessfulSaveState(
+                    newRegisteredGuids,
+                    newRegisteredCount);
             }
             catch (Exception ex)
             {
-                if (ex is TypeInitializationException tie &&
-                    tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
-                {
-                    MessageBox.Show(this,
-                        "The SQLite engine the tool uses failed to initialize.\n\n" +
-                        "This usually happens when the EXE is run directly from inside the ZIP, " +
-                        "or moved without the other files it shipped with.\n\n" +
-                        "Please extract the ZIP to a folder and run the tool from there, " +
-                        "without moving the EXE on its own.",
-                        "SQLite Initialization Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                }
-                else
+                AppLogger.Error("Save failed while updating master.sav.", ex);
+
+                if (!TryHandleSqliteInitError(ex))
                 {
                     MessageBox.Show(this,
                         "An error occurred while saving changes to master.sav:\n\n" + ex.Message,
@@ -378,39 +230,47 @@ namespace SMB4LeagueImportTool
                         MessageBoxIcon.Error);
                 }
             }
+        }
+        private void OpenLogsButton_Click(object? sender, EventArgs e)
+        {
+            try
+            {
+                AppLogger.Info("Open Logs Folder requested.");
 
+                ShellFolderOpener.CreateAndOpenFolder(AppLogger.LogFolderPath);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Failed to open logs folder.", ex);
+
+                MessageBox.Show(this,
+                    "The logs folder could not be opened.\n\n" + ex.Message,
+                    "Open Logs Folder Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
         private void LeagueImportForm_FormClosing(object? sender, FormClosingEventArgs e)
         {
+            if (!ConfirmDiscardUnsavedChanges("close the tool"))
+            {
+                e.Cancel = true;
+                return;
+            }
+
             CleanupTempFolder();
         }
 
         private void CleanupTempFolder()
         {
-            try
-            {
-                // Make sure no pooled connections are still holding onto temp .sqlite files
-                SqliteConnection.ClearAllPools();
-
-                if (!string.IsNullOrWhiteSpace(_savesFolderPath))
-                {
-                    string tempFolder = Path.Combine(_savesFolderPath, "_smb4_temp");
-
-                    if (Directory.Exists(tempFolder))
-                    {
-                        Directory.Delete(tempFolder, true);
-                    }
-                }
-            }
-            catch
-            {
-                // Silent fail — temp folder cleanup isn't critical
-            }
+            TempCleanupService.CleanupForSavesFolder(_savesFolderPath);
         }
         private void LoadLeaguesFranchisesButton_Click(object? sender, EventArgs e)
         {
             if (_savesFolderPath is null)
             {
+                AppLogger.Warning("Load requested but no saves folder is selected.");
+
                 MessageBox.Show(this,
                     "Please select a valid SMB4 saves folder first.",
                     "No Saves Folder",
@@ -419,26 +279,20 @@ namespace SMB4LeagueImportTool
                 return;
             }
 
+            if (!ConfirmDiscardUnsavedChanges("reload leagues and franchises"))
+                return;
+
             try
             {
+                AppLogger.Info($"Load requested for saves folder: {_savesFolderPath}");
                 LoadLeaguesAndFranchises(_savesFolderPath);
+                AppLogger.Info("Load completed successfully.");
             }
             catch (Exception ex)
             {
-                if (ex is TypeInitializationException tie &&
-                    tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
-                {
-                    MessageBox.Show(this,
-                        "The SQLite engine the tool uses failed to initialize.\n\n" +
-                        "This usually happens when the EXE is run directly from inside the ZIP, " +
-                        "or moved without the other files it shipped with.\n\n" +
-                        "Please extract the ZIP to a folder and run the tool from there, " +
-                        "without moving the EXE on its own.",
-                        "SQLite Initialization Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                }
-                else
+                AppLogger.Error("Load failed.", ex);
+
+                if (!TryHandleSqliteInitError(ex))
                 {
                     MessageBox.Show(this,
                         $"An error occurred while loading your leagues and franchises:\n\n{ex.Message}",
@@ -460,351 +314,331 @@ namespace SMB4LeagueImportTool
             _isDataLoaded = false;
             UpdateUiState();
 
-            DGVLeagues.Rows.Clear();
+            RunWithGridUpdatesSuppressed(() =>
+            {
+                DGVLeagues.Rows.Clear();
+            });
             LeagueImportToolStatusLabel.Text = "Loading leagues and franchises…";
+            AppLogger.Info($"Starting scan of saves folder: {savesFolderPath}");
 
-            if (!Directory.Exists(savesFolderPath))
+            var validation = Smb4SaveFolderValidator.Validate(savesFolderPath);
+
+            if (!validation.IsValid)
             {
                 MessageBox.Show(this,
-                    "The selected saves folder no longer exists.\n\nPlease re-select the folder.",
-                    "Folder Not Found",
+                    validation.Message,
+                    "Invalid Saves Folder",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
 
                 LoadLeaguesFranchisesButton.Enabled = false;
-                LeagueImportToolStatusLabel.Text = "Saves folder not found.";
+                LeagueImportToolStatusLabel.Text = validation.StatusText;
                 return;
             }
 
-            string masterSavPath = Path.Combine(savesFolderPath, "master.sav");
-            if (!File.Exists(masterSavPath))
-            {
-                MessageBox.Show(this,
-                    "master.sav was not found in the selected folder.\n\n" +
-                    "Please select the folder that contains your SMB4 save files.",
-                    "master.sav Not Found",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+            bool? repairFilenameMismatchesThisLoad = null;
 
-                LoadLeaguesFranchisesButton.Enabled = false;
-                LeagueImportToolStatusLabel.Text = "master.sav not found.";
-                return;
-            }
-
-            string[] leagueSaveFiles = Directory.GetFiles(
+            var loadResult = LeagueImportLoader.Load(
                 savesFolderPath,
-                "league-*.sav",
-                SearchOption.TopDirectoryOnly);
+                mismatch => AskToRepairFilenameMismatch(
+                    mismatch,
+                    ref repairFilenameMismatchesThisLoad));
 
-            if (leagueSaveFiles.Length == 0)
+            if (!loadResult.HasLeagueSaveFiles || loadResult.DisplayBuild is null)
             {
-                LeagueImportToolStatusLabel.Text =
-                    "master.sav found, but no league-*.sav files were detected.";
+                LeagueImportToolStatusLabel.Text = loadResult.StatusText;
                 return;
             }
 
-            var registeredGuids = new List<string>();
-            var leagueInfos = new Dictionary<string, LeagueRowInfo>(StringComparer.OrdinalIgnoreCase);
-            // ElectricFrost Fix: track any league-*.sav files we normalize
-            var renamedSaves = new List<(string OldName, string NewName, string LeagueName)>();
+            ApplyLeagueDisplayBuild(loadResult.DisplayBuild);
 
+            ShowFilenameRepairResults(
+                loadResult.RenamedSaves,
+                loadResult.SkippedRenames,
+                loadResult.FailedRenames);
+        }
+        private void DGVLeagues_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
+        {
+            if (_isUpdatingGrid)
+                return;
 
-            using (var savManager = new SavManager(savesFolderPath))
-            {
-                // --- Read registered GUIDs from master.sav ---
-                string masterSqlitePath = savManager.DecompressSavToTemp(masterSavPath);
-                using (var masterConn = new SqliteConnection($"Data Source={masterSqlitePath};Mode=ReadOnly;"))
-                {
-                    masterConn.Open();
-                    using var cmd = new SqliteCommand(
-                        "SELECT HEX(GUID), isMissing FROM t_league_savedatas ORDER BY rowid",
-                        masterConn);
-                    using var reader = cmd.ExecuteReader();
-                    while (reader.Read())
-                    {
-                        string rawHex = reader.IsDBNull(0) ? string.Empty : reader.GetString(0).ToUpperInvariant();
-                        int isMissing = reader.IsDBNull(1) ? 0 : reader.GetInt32(1);
+            if (DGVLeagues.IsCurrentCellDirty)
+                DGVLeagues.CommitEdit(DataGridViewDataErrorContexts.Commit);
+        }
 
-                        if (string.IsNullOrWhiteSpace(rawHex))
-                            continue;
+        private void DGVLeagues_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
+        {
+            if (_isUpdatingGrid)
+                return;
 
-                        // Game treats missing entries as invalid; we won't treat them as registered
-                        if (isMissing != 0)
-                            continue;
+            if (e.RowIndex < 0 || e.ColumnIndex < 0)
+                return;
 
-                        registeredGuids.Add(rawHex);
-                    }
-                }
+            // Only care about the Registered checkbox column.
+            if (e.ColumnIndex != ColRegistered.Index)
+                return;
 
-                // --- Scan each league-*.sav file for name/guid/type ---
-                foreach (var originalLeagueSavPath in leagueSaveFiles)
-                {
-                    // Local copy so we can update if the file gets renamed (ElectricFrost Fix)
-                    string leagueSavPath = originalLeagueSavPath;
-                    string fileName = Path.GetFileName(leagueSavPath);
-                    string tempSqlitePath;
+            var row = DGVLeagues.Rows[e.RowIndex];
+            if (row.ReadOnly)
+                return; // Ignore default leagues.
 
-                    try
-                    {
-                        tempSqlitePath = savManager.DecompressSavToTemp(leagueSavPath);
-                    }
-                    catch
-                    {
-                        // If we can't decompress this .sav, still show a row so the user sees it
-                        var brokenInfo = new LeagueRowInfo
-                        {
-                            RawGuidHex = string.Empty,
-                            DisplayGuid = "N/A",
-                            Name = Path.GetFileNameWithoutExtension(fileName) + " (failed to open)",
-                            Type = "Unknown",
-                            SaveFileName = fileName
-                        };
-                        leagueInfos[fileName] = brokenInfo;
-                        continue;
-                    }
+            _hasUnsavedChanges = HasPendingRegistrationChanges();
 
-                    string rawGuid = string.Empty;
-                    string displayName = Path.GetFileNameWithoutExtension(fileName);
-                    bool isFranchise = false;
+            LeagueImportToolStatusLabel.Text = _hasUnsavedChanges
+                ? "Pending changes…"
+                : "No pending changes.";
 
-                    using (var conn = new SqliteConnection($"Data Source={tempSqlitePath};Mode=ReadOnly;"))
-                    {
-                        conn.Open();
+            UpdateUiState();
+        }
+        private void DGVLeagues_DataError(object? sender, DataGridViewDataErrorEventArgs e)
+        {
+            AppLogger.Error(
+                $"DataGridView data error. Context={e.Context}, RowIndex={e.RowIndex}, ColumnIndex={e.ColumnIndex}",
+                e.Exception);
 
-                        // Pull GUID + name from t_Leagues
-                        using (var cmd = new SqliteCommand("SELECT HEX(GUID), name FROM t_Leagues LIMIT 1", conn))
-                        using (var reader = cmd.ExecuteReader())
-                        {
-                            if (reader.Read())
-                            {
-                                if (!reader.IsDBNull(0))
-                                    rawGuid = reader.GetString(0).ToUpperInvariant();
-
-                                if (!reader.IsDBNull(1))
-                                    displayName = reader.GetString(1);
-                            }
-                        }
-
-                        // ----------------------------
-                        // ElectricFrost Fix:
-                        // Auto-rename league files when filename GUID != internal GUID
-                        // ----------------------------
-                        try
-                        {
-                            if (!string.IsNullOrEmpty(rawGuid))
-                            {
-                                // GUID from filename (if it looks like league-<guid>.sav)
-                                string fileGuid = null;
-                                string baseName = Path.GetFileNameWithoutExtension(fileName);
-
-                                if (baseName.StartsWith("league-", StringComparison.OrdinalIgnoreCase))
-                                {
-                                    string guidPart = baseName.Substring("league-".Length).Replace("-", "");
-                                    if (guidPart.Length == 32)
-                                        fileGuid = guidPart.ToUpperInvariant();
-                                }
-
-                                // If we have both and they differ, rename file to match internal GUID
-                                if (!string.IsNullOrEmpty(fileGuid) &&
-                                    !string.Equals(rawGuid, fileGuid, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    string newFileName = "league-" + FormatGuidWithDashes(rawGuid) + ".sav";
-                                    string newPath = Path.Combine(Path.GetDirectoryName(leagueSavPath)!, newFileName);
-
-                                    // If something already exists with the target name, back it up
-                                    if (File.Exists(newPath))
-                                    {
-                                        string backupPath = newPath + ".bak";
-                                        File.Move(newPath, backupPath, true);
-                                    }
-
-                                    File.Move(leagueSavPath, newPath);
-
-                                    // Update our local variables so the rest of the pipeline uses the new name
-                                    leagueSavPath = newPath;
-                                    fileName = Path.GetFileName(newPath);
-                                    // Record rename for post-load dialog (ElectricFrost Fix)
-                                    renamedSaves.Add((Path.GetFileName(originalLeagueSavPath), fileName, displayName));
-                                }
-                            }
-                        }
-                        catch
-                        {
-                            // If anything goes wrong, fail silently — this is a non-critical normalization step
-                        }
-
-                        // Detect franchise via t_franchise_seasons
-                        try
-                        {
-                            using var franchiseCmd =
-                                new SqliteCommand("SELECT 1 FROM t_franchise_seasons LIMIT 1", conn);
-                            using var fReader = franchiseCmd.ExecuteReader();
-                            isFranchise = fReader.Read();
-                        }
-                        catch (SqliteException)
-                        {
-                            // Table may not exist in pure league saves; that's fine.
-                            isFranchise = false;
-                        }
-                    }
-
-                    string type;
-                    if (!string.IsNullOrEmpty(rawGuid) && IsDefaultLeagueGuidRaw(rawGuid))
-                        type = "Default";
-                    else
-                        type = isFranchise ? "Franchise" : "Custom";
-
-                    var info = new LeagueRowInfo
-                    {
-                        RawGuidHex = rawGuid,
-                        DisplayGuid = string.IsNullOrEmpty(rawGuid) ? "N/A" : FormatGuidWithDashes(rawGuid),
-                        Name = displayName,
-                        Type = type,
-                        SaveFileName = fileName
-                    };
-
-                    // Use rawGuid as key when available; fall back to file name
-                    string key = string.IsNullOrEmpty(rawGuid) ? fileName : rawGuid;
-                    leagueInfos[key] = info;
-                }
-            }
-
-            // --- Build unified list of LeagueRowInfo objects ---
-            var allInfos = new List<LeagueRowInfo>();
-
-            // HashSet for quick membership checks (case-insensitive)
-            var registeredGuidSet = new HashSet<string>(registeredGuids, StringComparer.OrdinalIgnoreCase);
-
-            // 1. Registered GUIDs in order from master.sav
-            foreach (var rawGuid in registeredGuids)
-            {
-                if (!leagueInfos.TryGetValue(rawGuid, out var info))
-                {
-                    // master.sav references a GUID that has no corresponding league-*.sav file
-                    info = new LeagueRowInfo
-                    {
-                        RawGuidHex = rawGuid,
-                        DisplayGuid = FormatGuidWithDashes(rawGuid),
-                        Name = IsDefaultLeagueGuidRaw(rawGuid)
-                            ? "(Default league – save file missing)"
-                            : "(Missing save file)",
-                        Type = IsDefaultLeagueGuidRaw(rawGuid) ? "Default" : "Custom",
-                        SaveFileName = string.Empty
-                    };
-                }
-
-                info.IsRegistered = true;
-                allInfos.Add(info);
-            }
-
-            // 2. Unregistered league-*.sav files (GUIDs not in t_league_savedatas)
-            foreach (var kvp in leagueInfos)
-            {
-                string key = kvp.Key;
-
-                // Keys that are 32-char hex are GUID-based keys
-                bool isRegistered = key.Length == 32 && registeredGuidSet.Contains(key);
-                if (isRegistered)
-                    continue;
-
-                var info = kvp.Value;
-                if (!info.IsRegistered)
-                    info.IsRegistered = false;
-
-                allInfos.Add(info);
-            }
-
-            // Bucket LeagueRowInfo objects by registration + type so we can render the grid in a stable, human-readable order:
-            // Registered Default
-            // Registered Custom
-            // Registered Franchise
-            // Unregistered Custom
-            // Unregistered Franchise
-            // Other/Unknown (edge cases)
-
-            var registeredDefaults = new List<LeagueRowInfo>();
-            var registeredCustoms = new List<LeagueRowInfo>();
-            var registeredFranchises = new List<LeagueRowInfo>();
-            var unregisteredCustoms = new List<LeagueRowInfo>();
-            var unregisteredFranchises = new List<LeagueRowInfo>();
-            var others = new List<LeagueRowInfo>();
-
-            foreach (var info in allInfos)
-            {
-                bool isDefault = string.Equals(info.Type, "Default", StringComparison.OrdinalIgnoreCase);
-                bool isCustom = string.Equals(info.Type, "Custom", StringComparison.OrdinalIgnoreCase);
-                bool isFranchise = string.Equals(info.Type, "Franchise", StringComparison.OrdinalIgnoreCase);
-
-                if (info.IsRegistered)
-                {
-                    if (isDefault) registeredDefaults.Add(info);
-                    else if (isCustom) registeredCustoms.Add(info);
-                    else if (isFranchise) registeredFranchises.Add(info);
-                    else others.Add(info);
-                }
-                else
-                {
-                    if (isCustom) unregisteredCustoms.Add(info);
-                    else if (isFranchise) unregisteredFranchises.Add(info);
-                    else others.Add(info);
-                }
-            }
-
-            // --- Compute summary counts ---
-            int defaultCount =
-                registeredDefaults.Count;
-
-            int customCount =
-                registeredCustoms.Count +
-                unregisteredCustoms.Count;
-
-            int franchiseCount =
-                registeredFranchises.Count +
-                unregisteredFranchises.Count;
-
-            // Track original registered count (used for the Save Changes dialog)
-            _initialRegisteredCount =
-                registeredDefaults.Count +
-                registeredCustoms.Count +
-                registeredFranchises.Count;
-
-            // --- Populate the grid in the desired order ---
-
-            DGVLeagues.Rows.Clear();
-
-            void AddBucket(List<LeagueRowInfo> bucket)
-            {
-                foreach (var info in bucket)
-                    AddLeagueRowToGrid(info);
-            }
-
-            AddBucket(registeredDefaults);
-            AddBucket(registeredCustoms);
-            AddBucket(registeredFranchises);
-            AddBucket(unregisteredCustoms);
-            AddBucket(unregisteredFranchises);
-            AddBucket(others);
+            e.ThrowException = false;
 
             LeagueImportToolStatusLabel.Text =
-                $"All defaults loaded, {customCount} custom league(s) found, {franchiseCount} franchise(s) found.";
+                "Grid display error detected. Check the logs for details.";
+        }
+
+        // -------------------- helpers --------------------
+
+        private bool HasPendingRegistrationChanges()
+        {
+            if (!_isDataLoaded)
+                return false;
+
+            var currentRows = GetCurrentGridLeagueRows();
+
+            var changePlan = LeagueRegistrationChangePlanner.BuildPlan(
+                currentRows,
+                _initialRegisteredGuids);
+
+            return changePlan.HasChanges;
+        }
+        private void RunWithGridUpdatesSuppressed(Action action)
+        {
+            ArgumentNullException.ThrowIfNull(action);
+
+            _isUpdatingGrid = true;
+
+            try
+            {
+                action();
+            }
+            finally
+            {
+                _isUpdatingGrid = false;
+            }
+        }
+
+        private void ApplyLeagueDisplayBuild(LeagueDisplayBuildResult displayBuild)
+        {
+            _initialRegisteredCount = displayBuild.InitialRegisteredCount;
+            _initialRegisteredGuids = new HashSet<string>(
+                displayBuild.InitialRegisteredGuids,
+                StringComparer.OrdinalIgnoreCase);
+
+            RunWithGridUpdatesSuppressed(() =>
+            {
+                DGVLeagues.Rows.Clear();
+
+                foreach (var info in displayBuild.RowsInDisplayOrder)
+                    AddLeagueRowToGrid(info);
+            });
+
+            LeagueImportToolStatusLabel.Text =
+                $"All defaults loaded, {displayBuild.CustomCount} custom league(s) found, {displayBuild.FranchiseCount} franchise(s) found.";
+
+            AppLogger.Info(
+                $"Load summary: defaults={displayBuild.DefaultCount}, customs={displayBuild.CustomCount}, franchises={displayBuild.FranchiseCount}, registered={_initialRegisteredCount}.");
 
             _isDataLoaded = true;
             _hasUnsavedChanges = false;
+
             UpdateUiState();
-            // ElectricFrost Fix: let the user know if any saves were renamed
+        }
+        private bool ConfirmDiscardUnsavedChanges(string actionDescription)
+        {
+            if (!HasPendingRegistrationChanges())
+            {
+                _hasUnsavedChanges = false;
+                return true;
+            }
+
+            var choice = MessageBox.Show(this,
+                "You have unsaved registration changes.\n\n" +
+                $"If you continue, those changes will be discarded before you {actionDescription}.\n\n" +
+                "Do you want to continue?",
+                "Discard Unsaved Changes?",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            bool shouldContinue = choice == DialogResult.Yes;
+
+            if (shouldContinue)
+                AppLogger.Warning($"User discarded unsaved changes to {actionDescription}.");
+
+            return shouldContinue;
+        }
+        private bool TryGetSelectedLeagueInfoForExport(out LeagueRowInfo? info)
+        {
+            info = null;
+
+            if (!_isDataLoaded || _savesFolderPath is null)
+            {
+                MessageBox.Show(this,
+                    "Please load your leagues and franchises before exporting a save.",
+                    "Nothing to Export",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return false;
+            }
+
+            var row = DGVLeagues.CurrentRow;
+
+            if (row is null || row.IsNewRow)
+            {
+                MessageBox.Show(this,
+                    "Please select a league or franchise row to export.",
+                    "No Row Selected",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return false;
+            }
+
+            if (row.Tag is not LeagueRowInfo rowInfo)
+            {
+                MessageBox.Show(this,
+                    "The selected row does not have an associated save file.",
+                    "Export Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return false;
+            }
+
+            info = rowInfo;
+            return true;
+        }
+        private void ApplySelectedSavesFolder(
+            string savesFolderPath,
+            string statusText,
+            bool saveAsLastUsedFolder)
+        {
+            _savesFolderPath = savesFolderPath;
+
+            AppLogger.Info($"Using saves folder: {_savesFolderPath}");
+
+            MaybeWarnSteamCloud(_savesFolderPath);
+
+            SavesFolderPathLabel.Text = savesFolderPath;
+            LeagueImportToolStatusLabel.Text = statusText;
+
+            if (saveAsLastUsedFolder)
+            {
+                Properties.Settings.Default.LastSavesFolder = savesFolderPath;
+                Properties.Settings.Default.Save();
+            }
+
+            LoadLeaguesFranchisesButton.Enabled = true;
+
+            // Path is valid, but league data must still be loaded.
+            _isDataLoaded = false;
+            _hasUnsavedChanges = false;
+
+            UpdateUiState();
+        }
+        private void ShowNoChangesToSaveMessage()
+        {
+            LeagueImportToolStatusLabel.Text = "No changes to save.";
+            _hasUnsavedChanges = false;
+            UpdateUiState();
+
+            MessageBox.Show(this,
+                "There are no changes to save.",
+                "No Changes",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        private bool ConfirmSaveChanges(int newRegisteredCount)
+        {
+            var confirm = MessageBox.Show(this,
+                "You are about to update your master.sav file.\n\n" +
+                $"Registered Leagues/Franchises Before: {_initialRegisteredCount}\n" +
+                $"Registered Leagues/Franchises After:  {newRegisteredCount}\n\n" +
+                "Would you like to continue?",
+                "Confirm Save Changes",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            return confirm == DialogResult.Yes;
+        }
+        private void ApplySuccessfulSaveState(
+            IEnumerable<string> newRegisteredGuids,
+            int newRegisteredCount)
+        {
+            _initialRegisteredCount = newRegisteredCount;
+            _initialRegisteredGuids = new HashSet<string>(
+                newRegisteredGuids,
+                StringComparer.OrdinalIgnoreCase);
+
+            _hasUnsavedChanges = false;
+
+            LeagueImportToolStatusLabel.Text =
+                "Saved changes successfully. A timestamped backup of master.sav was created.";
+
+            UpdateUiState();
+        }
+        private bool ShowMissingCheckedSavesWarningIfNeeded(
+            IReadOnlyList<LeagueRowInfo> missingCheckedSaves)
+        {
+            if (missingCheckedSaves.Count == 0)
+                return false;
+
+            var sb = new StringBuilder();
+
+            sb.AppendLine("One or more checked entries do not have a matching league-*.sav file.");
+            sb.AppendLine();
+            sb.AppendLine("These entries cannot be safely registered because master.sav would reference saves that do not exist.");
+            sb.AppendLine();
+            sb.AppendLine("Missing checked saves:");
+            sb.AppendLine();
+
+            foreach (var info in missingCheckedSaves.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                sb.AppendLine($"• {info.Name} ({info.DisplayGuid})");
+            }
+
+            MessageBox.Show(this,
+                sb.ToString(),
+                "Missing Save Files",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+
+            LeagueImportToolStatusLabel.Text = "Save canceled. One or more checked saves are missing.";
+            return true;
+        }
+        private void ShowFilenameRepairResults(
+    IReadOnlyList<(string OldName, string NewName, string LeagueName)> renamedSaves,
+    IReadOnlyList<(string OldName, string CorrectName, string LeagueName)> skippedRenames,
+    IReadOnlyList<(string FileName, string Reason)> failedRenames)
+        {
             if (renamedSaves.Count > 0)
             {
                 var sb = new StringBuilder();
+
                 sb.AppendLine("One or more league save files had filenames that didn't match");
                 sb.AppendLine("their internal IDs. The tool normalized them so the game and");
-                sb.AppendLine("other tools can recognize them reliably.\n");
+                sb.AppendLine("other tools can recognize them reliably.");
+                sb.AppendLine();
                 sb.AppendLine("Renamed saves:");
                 sb.AppendLine();
 
-                // Sort for polish and consistency
-                foreach (var (OldName, NewName, LeagueName) in renamedSaves.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
+                foreach (var (oldName, newName, leagueName) in
+                         renamedSaves.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
                 {
-                    sb.AppendLine($"{OldName} → {NewName}   ({LeagueName})");
+                    sb.AppendLine($"{oldName} → {newName}   ({leagueName})");
                 }
 
                 MessageBox.Show(
@@ -814,49 +648,61 @@ namespace SMB4LeagueImportTool
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
             }
+
+            if (skippedRenames.Count > 0)
+            {
+                var sb = new StringBuilder();
+
+                sb.AppendLine("One or more league save files had filenames that did not match their internal IDs.");
+                sb.AppendLine("You chose not to repair them during this load.");
+                sb.AppendLine();
+                sb.AppendLine("Skipped repairs:");
+                sb.AppendLine();
+
+                foreach (var (oldName, correctName, leagueName) in
+                         skippedRenames.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"{oldName} → {correctName}   ({leagueName})");
+                }
+
+                MessageBox.Show(
+                    this,
+                    sb.ToString(),
+                    "League Save Filename Repair Skipped",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+
+            if (failedRenames.Count > 0)
+            {
+                var sb = new StringBuilder();
+
+                sb.AppendLine("One or more league save files could not be renamed to match their internal IDs.");
+                sb.AppendLine("These files were loaded as-is and may not register correctly.");
+                sb.AppendLine();
+                sb.AppendLine("Failed renames:");
+                sb.AppendLine();
+
+                foreach (var (fileName, reason) in
+                         failedRenames.OrderBy(r => r.FileName, StringComparer.OrdinalIgnoreCase))
+                {
+                    sb.AppendLine($"{fileName}: {reason}");
+                }
+
+                MessageBox.Show(
+                    this,
+                    sb.ToString(),
+                    "League Save Rename Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
         }
-
-        private void DGVLeagues_CurrentCellDirtyStateChanged(object? sender, EventArgs e)
-        {
-            if (DGVLeagues.IsCurrentCellDirty)
-                DGVLeagues.CommitEdit(DataGridViewDataErrorContexts.Commit);
-        }
-
-        private void DGVLeagues_CellValueChanged(object? sender, DataGridViewCellEventArgs e)
-        {
-            if (e.RowIndex < 0)
-                return;
-
-            // Only care about the Registered checkbox column
-            if (DGVLeagues.Columns[e.ColumnIndex] != ColRegistered)
-                return;
-
-            var row = DGVLeagues.Rows[e.RowIndex];
-            if (row.ReadOnly)
-                return; // ignore default leagues
-
-            _hasUnsavedChanges = true;
-            LeagueImportToolStatusLabel.Text = "Pending changes…";
-        }
-
-        // -------------------- helpers --------------------
-
-        private static bool IsSteamCloudDetected(string savesFolderPath)
-        {
-            // Steam Cloud marker file (AutoCloud)
-            string autoCloudPath = Path.Combine(savesFolderPath, "steam_autocloud.vdf");
-            return File.Exists(autoCloudPath);
-        }
-
         private void MaybeWarnSteamCloud(string savesFolderPath)
         {
             if (_steamCloudWarningShown)
                 return;
 
-            if (string.IsNullOrWhiteSpace(savesFolderPath) || !Directory.Exists(savesFolderPath))
-                return;
-
-            if (!IsSteamCloudDetected(savesFolderPath))
+            if (!SteamCloudDetector.IsDetected(savesFolderPath))
                 return;
 
             _steamCloudWarningShown = true;
@@ -873,60 +719,24 @@ namespace SMB4LeagueImportTool
                 MessageBoxIcon.Warning
             );
         }
-
-        private static string FormatGuidWithDashes(string rawHex)
+        private bool TryHandleSqliteInitError(Exception ex)
         {
-            if (string.IsNullOrWhiteSpace(rawHex))
-                return string.Empty;
-
-            string upper = rawHex.ToUpperInvariant();
-            if (upper.Length != 32)
-                return upper;
-
-            return string.Format("{0}-{1}-{2}-{3}-{4}",
-                upper.Substring(0, 8),
-                upper.Substring(8, 4),
-                upper.Substring(12, 4),
-                upper.Substring(16, 4),
-                upper.Substring(20));
-        }
-        // Converts a 32-character hex GUID (as returned by HEX(GUID) in SQLite)
-        // into the raw byte[] format expected by the GUID BLOB column in t_league_savedatas.
-        private static byte[] HexToBytes(string hex)
-        {
-            if (string.IsNullOrWhiteSpace(hex))
-                return Array.Empty<byte>();
-
-            string cleaned = hex.Trim();
-            if (cleaned.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                cleaned = cleaned.Substring(2);
-
-            if (cleaned.Length % 2 != 0)
-                throw new ArgumentException("Hex string has an invalid length.", nameof(hex));
-
-            var bytes = new byte[cleaned.Length / 2];
-            for (int i = 0; i < bytes.Length; i++)
+            if (ex is TypeInitializationException tie &&
+                tie.TypeName?.Contains("Microsoft.Data.Sqlite.SqliteConnection") == true)
             {
-                bytes[i] = Convert.ToByte(cleaned.Substring(i * 2, 2), 16);
+                MessageBox.Show(this,
+                    "The SQLite engine the tool uses failed to initialize.\n\n" +
+                    "This usually happens when the EXE is run directly from inside the ZIP, " +
+                    "or moved without the other files it shipped with.\n\n" +
+                    "Please extract the ZIP to a folder and run the tool from there, " +
+                    "without moving the EXE on its own.",
+                    "SQLite Initialization Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return true;
             }
-
-            return bytes;
-        }
-        private static bool IsDefaultLeagueGuidRaw(string rawHex)
-        {
-            if (string.IsNullOrEmpty(rawHex))
-                return false;
-
-            string upper = rawHex.ToUpperInvariant();
-            foreach (var def in DefaultLeagueGuidsRaw)
-            {
-                if (upper == def)
-                    return true;
-            }
-
             return false;
         }
-
         private void AddLeagueRowToGrid(LeagueRowInfo info)
         {
             int rowIndex = DGVLeagues.Rows.Add(
@@ -940,66 +750,95 @@ namespace SMB4LeagueImportTool
 
             row.Tag = info; // This is so Save/Export can reconstruct GUIDs and file names
 
-            if (IsDefaultLeagueGuidRaw(info.RawGuidHex))
+            if (LeagueGuidHelper.IsDefaultLeagueGuidRaw(info.RawGuidHex))
             {
                 row.ReadOnly = true;
                 row.DefaultCellStyle.BackColor = System.Drawing.Color.Gainsboro;
                 row.DefaultCellStyle.ForeColor = System.Drawing.Color.DimGray;
             }
         }
+        private bool AskToRepairFilenameMismatch(
+            LeagueFilenameMismatchInfo mismatch,
+            ref bool? repairFilenameMismatchesThisLoad)
+        {
+            if (repairFilenameMismatchesThisLoad is null)
+            {
+                var choice = MessageBox.Show(
+                    this,
+                    "One or more league/franchise save files have filenames that do not match their internal IDs.\n\n" +
+                    "This can happen when a save was copied, renamed, exported, or shared manually.\n\n" +
+                    "Repairing the filename helps SMB4 and related tools recognize the save reliably.\n\n" +
+                    "Do you want this tool to repair mismatched league save filenames now?\n\n" +
+                    "A timestamped backup will be created if the target filename already exists.",
+                    "Repair League Save Filenames?",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
 
+                repairFilenameMismatchesThisLoad = choice == DialogResult.Yes;
+            }
+
+            return repairFilenameMismatchesThisLoad == true;
+        }
+        private List<LeagueRowInfo> GetCurrentGridLeagueRows()
+        {
+            var rows = new List<LeagueRowInfo>();
+
+            foreach (DataGridViewRow row in DGVLeagues.Rows)
+            {
+                if (row.IsNewRow)
+                    continue;
+
+                if (row.Tag is not LeagueRowInfo info)
+                    continue;
+
+                bool isRegistered = false;
+
+                if (row.Cells[ColRegistered.Index].Value is bool checkedValue)
+                    isRegistered = checkedValue;
+
+                info.IsRegistered = isRegistered;
+                rows.Add(info);
+            }
+
+            return rows;
+        }
         private void ExportSaveButton_Click(object? sender, EventArgs e)
         {
-            if (!_isDataLoaded || _savesFolderPath is null)
-            {
-                MessageBox.Show(this,
-                    "Please load your leagues and franchises before exporting a save.",
-                    "Nothing to Export",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+            if (!TryGetSelectedLeagueInfoForExport(out var info) || info is null)
                 return;
-            }
 
-            var row = DGVLeagues.CurrentRow;
-            if (row is null || row.IsNewRow)
+            string savesFolderPath = _savesFolderPath!;
+            string sourcePath;
+
+            try
+            {
+                sourcePath = LeagueSaveExporter.GetSourcePath(savesFolderPath, info);
+            }
+            catch (InvalidOperationException ex)
             {
                 MessageBox.Show(this,
-                    "Please select a league or franchise row to export.",
-                    "No Row Selected",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
-                return;
-            }
-            // Each row should have a LeagueRowInfo in Tag.
-            // If not, something went wrong during grid population.
-
-            if (row.Tag is not LeagueRowInfo info)
-            {
-                MessageBox.Show(this,
-                    "The selected row does not have an associated save file.",
-                    "Export Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(info.SaveFileName))
-            {
-                MessageBox.Show(this,
-                    "This entry does not have a corresponding league-*.sav file to export.\n\n" +
-                    "It may be a missing or invalid registration.",
+                    ex.Message + "\n\nIt may be a missing or invalid registration.",
                     "No Save File",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
                 return;
             }
-
-            string sourcePath = Path.Combine(_savesFolderPath, info.SaveFileName);
-            if (!File.Exists(sourcePath))
+            catch (FileNotFoundException ex)
             {
                 MessageBox.Show(this,
-                    "The underlying save file could not be found on disk:\n\n" + sourcePath,
+                    "The underlying save file could not be found on disk:\n\n" + ex.FileName,
                     "Save File Missing",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                return;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Export source validation failed.", ex);
+
+                MessageBox.Show(this,
+                    "The selected save could not be prepared for export:\n\n" + ex.Message,
+                    "Export Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
                 return;
@@ -1008,7 +847,7 @@ namespace SMB4LeagueImportTool
             using var dialog = new SaveFileDialog
             {
                 Title = "Export league/franchise save",
-                FileName = info.SaveFileName,
+                FileName = Path.GetFileName(sourcePath),
                 Filter = "SMB4 Save Files (*.sav)|*.sav|All Files (*.*)|*.*",
                 OverwritePrompt = true
             };
@@ -1018,11 +857,18 @@ namespace SMB4LeagueImportTool
 
             try
             {
-                File.Copy(sourcePath, dialog.FileName, overwrite: true);
-                LeagueImportToolStatusLabel.Text = $"Exported {info.Name} to {Path.GetFileName(dialog.FileName)}.";
+                LeagueSaveExporter.Export(
+                    savesFolderPath,
+                    info,
+                    dialog.FileName);
+
+                LeagueImportToolStatusLabel.Text =
+                    $"Exported {info.Name} to {Path.GetFileName(dialog.FileName)}.";
             }
             catch (Exception ex)
             {
+                AppLogger.Error($"Export failed for destination path: {dialog.FileName}", ex);
+
                 MessageBox.Show(this,
                     "An error occurred while exporting the save file:\n\n" + ex.Message,
                     "Export Error",
