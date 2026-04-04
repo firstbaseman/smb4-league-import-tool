@@ -42,6 +42,8 @@ namespace SMB4LeagueImportTool
         public LeagueImportForm()
         {
             InitializeComponent();
+            tableLayoutPanelTop.SetRowSpan(SavesFolderPathLabel, 2);
+            tableLayoutPanelTop.SetRowSpan(AboutButton, 2);
 
             // Initial UI text
             this.Text = $"SMB4 League Import Tool {VersionInfo.Version}";
