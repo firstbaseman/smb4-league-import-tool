@@ -6,12 +6,9 @@ namespace SMB4LeagueImportTool.Core
     {
         private static readonly object LockObject = new();
 
-        public static string LogFolderPath { get; } = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "SMB4LeagueImportTool",
-            "Logs");
+        public static string LogFolderPath => AppPathResolver.GetLogFolderPath();
 
-        public static string LogFilePath { get; } = Path.Combine(
+        public static string LogFilePath => Path.Combine(
             LogFolderPath,
             "SMB4LeagueImportTool.log");
 
@@ -48,6 +45,9 @@ namespace SMB4LeagueImportTool.Core
             Write("INFO", $".NET: {Environment.Version}");
             Write("INFO", $"Machine: {Environment.MachineName}");
             Write("INFO", $"User: {Environment.UserName}");
+            Write("INFO", $"Runtime environment: {RuntimeEnvironmentInfo.GetRuntimeLabel()}");
+            Write("INFO", RuntimeEnvironmentInfo.GetEnvironmentDetails());
+            Write("INFO", $"Log folder: {LogFolderPath}");
             Write("INFO", $"Log file: {LogFilePath}");
         }
 

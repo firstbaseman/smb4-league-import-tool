@@ -15,6 +15,7 @@ namespace SMB4LeagueImportTool
         private bool _isUpdatingGrid;
         private int _initialRegisteredCount;
         private bool _steamCloudWarningShown;
+        private bool _protonPrefixWarningShown;
         private HashSet<string> _initialRegisteredGuids = new(StringComparer.OrdinalIgnoreCase);
         public LeagueImportForm()
         {
@@ -531,6 +532,7 @@ namespace SMB4LeagueImportTool
             AppLogger.Info($"Using saves folder: {_savesFolderPath}");
 
             MaybeWarnSteamCloud(_savesFolderPath);
+            MaybeWarnWrongProtonPrefix();
 
             SavesFolderPathLabel.Text = savesFolderPath;
             LeagueImportToolStatusLabel.Text = statusText;
@@ -718,6 +720,30 @@ namespace SMB4LeagueImportTool
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning
             );
+        }
+        private void MaybeWarnWrongProtonPrefix()
+        {
+            if (_protonPrefixWarningShown)
+                return;
+
+            if (!RuntimeEnvironmentInfo.IsProbablyWineOrProton())
+                return;
+
+            if (RuntimeEnvironmentInfo.IsExpectedSmb4SteamContext())
+                return;
+
+            _protonPrefixWarningShown = true;
+
+            MessageBox.Show(
+                this,
+                "This tool appears to be running through Wine/Proton, but it does not look like it is running inside the Super Mega Baseball 4 Steam prefix.\n\n" +
+                $"Expected Steam App ID: {Smb4SaveConstants.SteamAppId}\n\n" +
+                "If you are using Protontricks, choose:\n\n" +
+                $"{Smb4SaveConstants.SteamAppName} ({Smb4SaveConstants.SteamAppId})\n\n" +
+                "The tool may still work if you manually select the correct saves folder, but using the SMB4 prefix is recommended.",
+                "Wine/Proton Prefix Warning",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
         }
         private bool TryHandleSqliteInitError(Exception ex)
         {
