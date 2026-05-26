@@ -22,7 +22,7 @@ namespace SMB4LeagueImportTool.Core
 
             var result = new LeagueSaveScanResult();
 
-            using var savManager = new SavManager(savesFolderPath);
+            using var savManager = new SavManager();
 
             foreach (var originalLeagueSavPath in leagueSaveFiles)
             {
@@ -43,7 +43,7 @@ namespace SMB4LeagueImportTool.Core
                         RawGuidHex = string.Empty,
                         DisplayGuid = "N/A",
                         Name = Path.GetFileNameWithoutExtension(fileName) + " (failed to open)",
-                        Type = LeagueTypes.Unknown,
+                        Kind = LeagueKind.Unknown,
                         SaveFileName = fileName
                     };
 
@@ -55,21 +55,35 @@ namespace SMB4LeagueImportTool.Core
                 string displayName = Path.GetFileNameWithoutExtension(fileName);
                 bool isFranchise = false;
 
-                using var conn = new SqliteConnection(
-                    $"Data Source={tempSqlitePath};Mode=ReadOnly;Pooling=False;");
-
-                conn.Open();
-
-                using (var cmd = new SqliteCommand(Smb4SqlQueries.ReadLeagueGuidAndName, conn))
-                using (var reader = cmd.ExecuteReader())
+                using (var conn = SqliteConnectionFactory.CreateReadOnly(tempSqlitePath))
                 {
-                    if (reader.Read())
-                    {
-                        if (!reader.IsDBNull(0))
-                            rawGuid = reader.GetString(0).ToUpperInvariant();
+                    conn.Open();
 
-                        if (!reader.IsDBNull(1))
-                            displayName = reader.GetString(1);
+                    using (var cmd = new SqliteCommand(Smb4SqlQueries.ReadLeagueGuidAndName, conn))
+                    using (var reader = cmd.ExecuteReader())
+                    {
+                        if (reader.Read())
+                        {
+                            if (!reader.IsDBNull(0))
+                                rawGuid = LeagueGuidHelper.NormalizeRawGuidHex(reader.GetString(0));
+
+                            if (!reader.IsDBNull(1))
+                                displayName = reader.GetString(1);
+                        }
+                    }
+
+                    try
+                    {
+                        using var franchiseCmd =
+                            new SqliteCommand(Smb4SqlQueries.DetectFranchiseSave, conn);
+
+                        using var franchiseReader = franchiseCmd.ExecuteReader();
+                        isFranchise = franchiseReader.Read();
+                    }
+                    catch (SqliteException)
+                    {
+                        // Table may not exist in pure league saves; that's fine.
+                        isFranchise = false;
                     }
                 }
 
@@ -82,40 +96,24 @@ namespace SMB4LeagueImportTool.Core
                     displayName,
                     shouldRepairFilenameMismatch);
 
-                try
-                {
-                    using var franchiseCmd =
-                        new SqliteCommand(Smb4SqlQueries.DetectFranchiseSave, conn);
-
-                    using var franchiseReader = franchiseCmd.ExecuteReader();
-                    isFranchise = franchiseReader.Read();
-                }
-                catch (SqliteException)
-                {
-                    // Table may not exist in pure league saves; that's fine.
-                    isFranchise = false;
-                }
-
-                string type;
+                LeagueKind kind;
 
                 if (!string.IsNullOrEmpty(rawGuid) &&
                     LeagueGuidHelper.IsDefaultLeagueGuidRaw(rawGuid))
                 {
-                    type = LeagueTypes.Default;
+                    kind = LeagueKind.Default;
                 }
                 else
                 {
-                    type = isFranchise ? LeagueTypes.Franchise : LeagueTypes.Custom;
+                    kind = isFranchise ? LeagueKind.Franchise : LeagueKind.Custom;
                 }
 
                 var info = new LeagueRowInfo
                 {
                     RawGuidHex = rawGuid,
-                    DisplayGuid = string.IsNullOrEmpty(rawGuid)
-                        ? "N/A"
-                        : LeagueGuidHelper.FormatGuidWithDashes(rawGuid),
+                    DisplayGuid = LeagueGuidHelper.ToDisplayGuid(rawGuid),
                     Name = displayName,
-                    Type = type,
+                    Kind = kind,
                     SaveFileName = fileName
                 };
 
@@ -142,30 +140,17 @@ namespace SMB4LeagueImportTool.Core
                 if (string.IsNullOrEmpty(rawGuid))
                     return;
 
-                string? fileGuid = null;
-                string baseName = Path.GetFileNameWithoutExtension(fileName);
-
-                if (baseName.StartsWith(Smb4SaveConstants.LeagueFilePrefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    string guidPart = baseName
-                        .Substring(Smb4SaveConstants.LeagueFilePrefix.Length)
-                        .Replace("-", "");
-
-                    if (guidPart.Length == 32)
-                        fileGuid = guidPart.ToUpperInvariant();
-                }
-
-                bool hasFilenameGuidMismatch =
-                    !string.IsNullOrEmpty(fileGuid) &&
-                    !string.Equals(rawGuid, fileGuid, StringComparison.OrdinalIgnoreCase);
-
-                if (!hasFilenameGuidMismatch)
+                if (!LeagueGuidHelper.IsValidRawGuidHex(rawGuid))
                     return;
 
-                string newFileName =
-                    Smb4SaveConstants.LeagueFilePrefix +
-                    LeagueGuidHelper.FormatGuidWithDashes(rawGuid) +
-                    Smb4SaveConstants.SaveFileExtension;
+                string newFileName = LeagueSaveFileNameHelper.GetExpectedFileName(rawGuid);
+
+                bool hasFilenameMismatch =
+                    !string.Equals(fileName, newFileName, StringComparison.OrdinalIgnoreCase);
+
+                if (!hasFilenameMismatch)
+                    return;
+
                 string newPath = Path.Combine(Path.GetDirectoryName(leagueSavPath)!, newFileName);
 
                 var mismatch = new LeagueFilenameMismatchInfo

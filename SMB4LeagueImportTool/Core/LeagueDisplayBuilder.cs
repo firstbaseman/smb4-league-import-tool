@@ -15,9 +15,7 @@ namespace SMB4LeagueImportTool.Core
             ArgumentNullException.ThrowIfNull(leagueInfos);
             ArgumentNullException.ThrowIfNull(registeredGuids);
 
-            var result = new LeagueDisplayBuildResult();
-
-            var allInfos = new List<LeagueRowInfo>();
+            var allRows = new List<LeagueRowViewModel>();
             var registeredGuidSet = new HashSet<string>(
                 registeredGuids,
                 StringComparer.OrdinalIgnoreCase);
@@ -28,22 +26,23 @@ namespace SMB4LeagueImportTool.Core
                 if (!leagueInfos.TryGetValue(rawGuid, out var info))
                 {
                     // master.sav references a GUID that has no matching league-*.sav file.
+                    bool isDefaultMissingLeague = LeagueGuidHelper.IsDefaultLeagueGuidRaw(rawGuid);
+
                     info = new LeagueRowInfo
                     {
                         RawGuidHex = rawGuid,
-                        DisplayGuid = LeagueGuidHelper.FormatGuidWithDashes(rawGuid),
-                        Name = LeagueGuidHelper.IsDefaultLeagueGuidRaw(rawGuid)
+                        DisplayGuid = LeagueGuidHelper.ToDisplayGuid(rawGuid),
+                        Name = isDefaultMissingLeague
                             ? "(Default league – save file missing)"
                             : "(Missing save file)",
-                        Type = LeagueGuidHelper.IsDefaultLeagueGuidRaw(rawGuid)
-                        ? LeagueTypes.Default
-                        : LeagueTypes.Custom,
+                        Kind = isDefaultMissingLeague
+                            ? LeagueKind.Default
+                            : LeagueKind.Custom,
                         SaveFileName = string.Empty
                     };
                 }
 
-                info.IsRegistered = true;
-                allInfos.Add(info);
+                allRows.Add(new LeagueRowViewModel(info, isRegistered: true));
             }
 
             // 2. Unregistered league-*.sav files.
@@ -59,84 +58,79 @@ namespace SMB4LeagueImportTool.Core
                     continue;
 
                 var info = kvp.Value;
-                info.IsRegistered = false;
-                allInfos.Add(info);
+                allRows.Add(new LeagueRowViewModel(info, isRegistered: false));
             }
 
-            var registeredDefaults = new List<LeagueRowInfo>();
-            var registeredCustoms = new List<LeagueRowInfo>();
-            var registeredFranchises = new List<LeagueRowInfo>();
-            var unregisteredCustoms = new List<LeagueRowInfo>();
-            var unregisteredFranchises = new List<LeagueRowInfo>();
-            var others = new List<LeagueRowInfo>();
+            var registeredDefaults = new List<LeagueRowViewModel>();
+            var registeredCustoms = new List<LeagueRowViewModel>();
+            var registeredFranchises = new List<LeagueRowViewModel>();
+            var unregisteredCustoms = new List<LeagueRowViewModel>();
+            var unregisteredFranchises = new List<LeagueRowViewModel>();
+            var others = new List<LeagueRowViewModel>();
 
-            foreach (var info in allInfos)
+            foreach (var row in allRows)
             {
-                bool isDefault = string.Equals(info.Type, LeagueTypes.Default, StringComparison.OrdinalIgnoreCase);
-                bool isCustom = string.Equals(info.Type, LeagueTypes.Custom, StringComparison.OrdinalIgnoreCase);
-                bool isFranchise = string.Equals(info.Type, LeagueTypes.Franchise, StringComparison.OrdinalIgnoreCase);
+                bool isDefault = row.IsDefaultLeague;
+                bool isCustom = row.IsCustomLeague;
+                bool isFranchise = row.IsFranchise;
 
-                if (info.IsRegistered)
+                if (row.IsRegistered)
                 {
                     if (isDefault)
-                        registeredDefaults.Add(info);
+                        registeredDefaults.Add(row);
                     else if (isCustom)
-                        registeredCustoms.Add(info);
+                        registeredCustoms.Add(row);
                     else if (isFranchise)
-                        registeredFranchises.Add(info);
+                        registeredFranchises.Add(row);
                     else
-                        others.Add(info);
+                        others.Add(row);
                 }
                 else
                 {
                     if (isCustom)
-                        unregisteredCustoms.Add(info);
+                        unregisteredCustoms.Add(row);
                     else if (isFranchise)
-                        unregisteredFranchises.Add(info);
+                        unregisteredFranchises.Add(row);
                     else
-                        others.Add(info);
+                        others.Add(row);
                 }
             }
 
-            result.DefaultCount = registeredDefaults.Count;
+            var result = new LeagueDisplayBuildResult
+            {
+                DefaultCount = registeredDefaults.Count,
 
-            result.CustomCount =
-                registeredCustoms.Count +
-                unregisteredCustoms.Count;
+                CustomCount =
+                    registeredCustoms.Count +
+                    unregisteredCustoms.Count,
 
-            result.FranchiseCount =
-                registeredFranchises.Count +
-                unregisteredFranchises.Count;
+                FranchiseCount =
+                    registeredFranchises.Count +
+                    unregisteredFranchises.Count,
 
-            result.InitialRegisteredCount =
-                registeredDefaults.Count +
-                registeredCustoms.Count +
-                registeredFranchises.Count;
+                InitialRegisteredCount =
+                    registeredDefaults.Count +
+                    registeredCustoms.Count +
+                    registeredFranchises.Count
+            };
 
             foreach (var rawGuid in registeredDefaults
                          .Concat(registeredCustoms)
                          .Concat(registeredFranchises)
-                         .Select(i => i.RawGuidHex)
+                         .Select(row => row.Info.RawGuidHex)
                          .Where(g => !string.IsNullOrWhiteSpace(g)))
             {
                 result.InitialRegisteredGuids.Add(rawGuid);
             }
 
-            AddBucket(result.RowsInDisplayOrder, registeredDefaults);
-            AddBucket(result.RowsInDisplayOrder, registeredCustoms);
-            AddBucket(result.RowsInDisplayOrder, registeredFranchises);
-            AddBucket(result.RowsInDisplayOrder, unregisteredCustoms);
-            AddBucket(result.RowsInDisplayOrder, unregisteredFranchises);
-            AddBucket(result.RowsInDisplayOrder, others);
+            result.RowsInDisplayOrder.AddRange(registeredDefaults);
+            result.RowsInDisplayOrder.AddRange(registeredCustoms);
+            result.RowsInDisplayOrder.AddRange(registeredFranchises);
+            result.RowsInDisplayOrder.AddRange(unregisteredCustoms);
+            result.RowsInDisplayOrder.AddRange(unregisteredFranchises);
+            result.RowsInDisplayOrder.AddRange(others);
 
             return result;
-        }
-
-        private static void AddBucket(
-            List<LeagueRowInfo> target,
-            IEnumerable<LeagueRowInfo> bucket)
-        {
-            target.AddRange(bucket);
         }
     }
 }

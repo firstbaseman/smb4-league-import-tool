@@ -5,15 +5,15 @@ namespace SMB4LeagueImportTool.Models
 {
     public sealed class LeagueDisplayBuildResult
     {
-        public List<LeagueRowInfo> RowsInDisplayOrder { get; } = new();
+        public List<LeagueRowViewModel> RowsInDisplayOrder { get; } = new();
 
-        public int DefaultCount { get; set; }
+        public int DefaultCount { get; init; }
 
-        public int CustomCount { get; set; }
+        public int CustomCount { get; init; }
 
-        public int FranchiseCount { get; set; }
+        public int FranchiseCount { get; init; }
 
-        public int InitialRegisteredCount { get; set; }
+        public int InitialRegisteredCount { get; init; }
 
         public HashSet<string> InitialRegisteredGuids { get; } =
             new(StringComparer.OrdinalIgnoreCase);

@@ -14,7 +14,7 @@ namespace SMB4LeagueImportTool.Core
 
             ArgumentNullException.ThrowIfNull(leagueInfo);
 
-            if (string.IsNullOrWhiteSpace(leagueInfo.SaveFileName))
+            if (!leagueInfo.HasSaveFile)
                 throw new InvalidOperationException(
                     "This entry does not have a corresponding league-*.sav file to export.");
 

@@ -10,12 +10,8 @@
         private readonly List<string> _tempFiles = new();
         private bool _disposed;
 
-        public SavManager(string savesFolderPath)
+        public SavManager()
         {
-            ArgumentNullException.ThrowIfNull(savesFolderPath);
-
-            if (!Directory.Exists(savesFolderPath))
-                throw new DirectoryNotFoundException($"Saves folder not found: {savesFolderPath}");
 
             string appTempRoot = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

@@ -96,7 +96,6 @@
             // ColRegistered
             // 
             ColRegistered.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            ColRegistered.DataPropertyName = "IsRegistered";
             ColRegistered.HeaderText = "Registered";
             ColRegistered.Name = "ColRegistered";
             ColRegistered.Resizable = DataGridViewTriState.True;
@@ -106,7 +105,6 @@
             // ColType
             // 
             ColType.AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            ColType.DataPropertyName = "SaveType";
             ColType.FillWeight = 50F;
             ColType.HeaderText = "Type";
             ColType.Name = "ColType";
@@ -117,7 +115,6 @@
             // ColLeagueFranchiseName
             // 
             ColLeagueFranchiseName.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
-            ColLeagueFranchiseName.DataPropertyName = "LeagueFranchiseName";
             ColLeagueFranchiseName.FillWeight = 60F;
             ColLeagueFranchiseName.HeaderText = "League/Franchise Name";
             ColLeagueFranchiseName.MaxInputLength = 24;
@@ -128,7 +125,6 @@
             // ColGUID
             // 
             ColGUID.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
-            ColGUID.DataPropertyName = "LeagueGUID";
             ColGUID.HeaderText = "GUID (league-*.sav)";
             ColGUID.Name = "ColGUID";
             ColGUID.ReadOnly = true;
@@ -136,7 +132,6 @@
             // 
             // ColFileName
             // 
-            ColFileName.DataPropertyName = "FileName";
             ColFileName.HeaderText = "File Name";
             ColFileName.Name = "ColFileName";
             ColFileName.Visible = false;

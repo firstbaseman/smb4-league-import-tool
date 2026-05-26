@@ -1,7 +1,4 @@
 ﻿using SMB4LeagueImportTool.Models;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace SMB4LeagueImportTool.Core
 {
@@ -12,31 +9,30 @@ namespace SMB4LeagueImportTool.Core
     public static class LeagueRegistrationChangePlanner
     {
         public static LeagueRegistrationChangePlan BuildPlan(
-            IEnumerable<LeagueRowInfo> rows,
-            ISet<string> initialRegisteredGuids)
+            IEnumerable<(LeagueRowViewModel RowModel, bool IsRegistered)> currentRows,
+            IReadOnlySet<string> initialRegisteredGuids)
         {
-            ArgumentNullException.ThrowIfNull(rows);
+            ArgumentNullException.ThrowIfNull(currentRows);
             ArgumentNullException.ThrowIfNull(initialRegisteredGuids);
 
             var plan = new LeagueRegistrationChangePlan();
 
-            foreach (var info in rows)
+            foreach (var row in currentRows)
             {
-                if (!info.IsRegistered)
+                if (!row.IsRegistered)
                     continue;
 
-                if (string.IsNullOrWhiteSpace(info.RawGuidHex))
+                var rowModel = row.RowModel;
+                var info = rowModel.Info;
+
+                if (!LeagueGuidHelper.IsValidRawGuidHex(info.RawGuidHex))
                     continue;
 
-                string rawGuid = info.RawGuidHex.Trim().ToUpperInvariant();
+                string rawGuid = LeagueGuidHelper.NormalizeRawGuidHex(info.RawGuidHex);
 
                 plan.NewRegisteredGuids.Add(rawGuid);
 
-                bool isMissingSave =
-                    string.IsNullOrWhiteSpace(info.SaveFileName) &&
-                    !LeagueGuidHelper.IsDefaultLeagueGuidRaw(rawGuid);
-
-                if (isMissingSave)
+                if (rowModel.IsMissingNonDefaultSave)
                     plan.MissingCheckedSaves.Add(info);
             }
 

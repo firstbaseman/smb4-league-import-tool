@@ -56,7 +56,7 @@ namespace SMB4LeagueImportTool
 
             SaveChangesButton.Enabled =
                 _isDataLoaded &&
-                HasPendingRegistrationChanges();
+                _hasUnsavedChanges;
         }
 
         // -------------------- lifecycle --------------------
@@ -78,7 +78,6 @@ namespace SMB4LeagueImportTool
         }
 
         // -------------------- UI handlers --------------------
-
         private void AboutButton_Click(object? sender, EventArgs e)
         {
             string message =
@@ -171,33 +170,19 @@ namespace SMB4LeagueImportTool
 
         private void SaveChangesButton_Click(object? sender, EventArgs e)
         {
-            if (!_isDataLoaded || _savesFolderPath is null)
-            {
-                MessageBox.Show(this,
-                    "Please load your leagues and franchises before saving changes.",
-                    "Nothing to Save",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+            if (!TryValidateSaveRequest())
                 return;
-            }
 
-            var currentRows = GetCurrentGridLeagueRows();
-
-            var changePlan = LeagueRegistrationChangePlanner.BuildPlan(
-                currentRows,
-                _initialRegisteredGuids);
+            var changePlan = BuildCurrentRegistrationChangePlan();
 
             var newRegisteredGuids = changePlan.NewRegisteredGuids;
             var missingCheckedSaves = changePlan.MissingCheckedSaves;
             int newRegisteredCount = changePlan.NewRegisteredCount;
 
-            if (!changePlan.HasChanges)
-            {
-                ShowNoChangesToSaveMessage();
+            if (HandleNoChangesToSave(changePlan))
                 return;
-            }
 
-            if (ShowMissingCheckedSavesWarningIfNeeded(missingCheckedSaves))
+            if (ShouldCancelSaveDueToMissingCheckedSaves(missingCheckedSaves))
                 return;
 
             if (!ConfirmSaveChanges(newRegisteredCount))
@@ -206,31 +191,9 @@ namespace SMB4LeagueImportTool
             AppLogger.Info(
                 $"Save confirmed. Registered before={_initialRegisteredCount}, after={newRegisteredCount}.");
 
-            try
-            {
-                MasterLeagueRegistry.RewriteRegisteredGuids(
-                    _savesFolderPath,
-                    newRegisteredGuids);
-
-                AppLogger.Info("Save operation completed successfully.");
-
-                ApplySuccessfulSaveState(
-                    newRegisteredGuids,
-                    newRegisteredCount);
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Error("Save failed while updating master.sav.", ex);
-
-                if (!TryHandleSqliteInitError(ex))
-                {
-                    MessageBox.Show(this,
-                        "An error occurred while saving changes to master.sav:\n\n" + ex.Message,
-                        "Save Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                }
-            }
+            SaveRegistrationChangesWithErrorHandling(
+                newRegisteredGuids,
+                newRegisteredCount);
         }
         private void OpenLogsButton_Click(object? sender, EventArgs e)
         {
@@ -279,6 +242,8 @@ namespace SMB4LeagueImportTool
                     MessageBoxIcon.Warning);
                 return;
             }
+            if (TryBlockIfSmb4IsRunning("load leagues and franchises"))
+                return;
 
             if (!ConfirmDiscardUnsavedChanges("reload leagues and franchises"))
                 return;
@@ -315,10 +280,6 @@ namespace SMB4LeagueImportTool
             _isDataLoaded = false;
             UpdateUiState();
 
-            RunWithGridUpdatesSuppressed(() =>
-            {
-                DGVLeagues.Rows.Clear();
-            });
             LeagueImportToolStatusLabel.Text = "Loading leagues and franchises…";
             AppLogger.Info($"Starting scan of saves folder: {savesFolderPath}");
 
@@ -347,7 +308,14 @@ namespace SMB4LeagueImportTool
 
             if (!loadResult.HasLeagueSaveFiles || loadResult.DisplayBuild is null)
             {
+                RunWithGridUpdatesSuppressed(() => DGVLeagues.Rows.Clear());
+
+                _initialRegisteredCount = 0;
+                _initialRegisteredGuids.Clear();
+
                 LeagueImportToolStatusLabel.Text = loadResult.StatusText;
+                ClearUnsavedChangesState();
+
                 return;
             }
 
@@ -383,13 +351,7 @@ namespace SMB4LeagueImportTool
             if (row.ReadOnly)
                 return; // Ignore default leagues.
 
-            _hasUnsavedChanges = HasPendingRegistrationChanges();
-
-            LeagueImportToolStatusLabel.Text = _hasUnsavedChanges
-                ? "Pending changes…"
-                : "No pending changes.";
-
-            UpdateUiState();
+            RefreshUnsavedChangesState();
         }
         private void DGVLeagues_DataError(object? sender, DataGridViewDataErrorEventArgs e)
         {
@@ -405,18 +367,80 @@ namespace SMB4LeagueImportTool
 
         // -------------------- helpers --------------------
 
+        private void RefreshUnsavedChangesState()
+        {
+            _hasUnsavedChanges = HasPendingRegistrationChanges();
+
+            LeagueImportToolStatusLabel.Text = _hasUnsavedChanges
+                ? "Pending changes…"
+                : "No pending changes.";
+
+            UpdateUiState();
+        }
+        private void ClearUnsavedChangesState()
+        {
+            _hasUnsavedChanges = false;
+            UpdateUiState();
+        }
         private bool HasPendingRegistrationChanges()
         {
             if (!_isDataLoaded)
                 return false;
 
+            return BuildCurrentRegistrationChangePlan().HasChanges;
+        }
+        private LeagueRegistrationChangePlan BuildCurrentRegistrationChangePlan()
+        {
             var currentRows = GetCurrentGridLeagueRows();
 
-            var changePlan = LeagueRegistrationChangePlanner.BuildPlan(
+            return LeagueRegistrationChangePlanner.BuildPlan(
                 currentRows,
                 _initialRegisteredGuids);
+        }
+        private bool TryValidateSaveRequest()
+        {
+            if (!_isDataLoaded)
+            {
+                MessageBox.Show(this,
+                    "Please load your leagues and franchises before saving changes.",
+                    "Nothing to Save",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
 
-            return changePlan.HasChanges;
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(_savesFolderPath))
+            {
+                MessageBox.Show(this,
+                    "Please select your SMB4 saves folder first.",
+                    "No Saves Folder Selected",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+
+                return false;
+            }
+            if (TryBlockIfSmb4IsRunning("save registration changes"))
+                return false;
+
+            // Pre-flight check: catch a missing master.sav before asking the user
+            // to confirm a save operation that cannot succeed.
+            string masterSavPath = Path.Combine(
+                _savesFolderPath,
+                Smb4SaveConstants.MasterSaveFileName);
+
+            if (!File.Exists(masterSavPath))
+            {
+                MessageBox.Show(
+                    "master.sav could not be found. Please reload a valid SMB4 saves folder before saving.",
+                    "Missing master.sav",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+
+                return false;
+            }
+
+            return true;
         }
         private void RunWithGridUpdatesSuppressed(Action action)
         {
@@ -456,18 +480,24 @@ namespace SMB4LeagueImportTool
                 $"Load summary: defaults={displayBuild.DefaultCount}, customs={displayBuild.CustomCount}, franchises={displayBuild.FranchiseCount}, registered={_initialRegisteredCount}.");
 
             _isDataLoaded = true;
-            _hasUnsavedChanges = false;
-
-            UpdateUiState();
+            ClearUnsavedChangesState();
         }
         private bool ConfirmDiscardUnsavedChanges(string actionDescription)
         {
-            if (!HasPendingRegistrationChanges())
-            {
-                _hasUnsavedChanges = false;
-                return true;
-            }
+            RefreshUnsavedChangesState();
 
+            if (!_hasUnsavedChanges)
+                return true;
+
+            bool shouldContinue = ShowDiscardUnsavedChangesDialog(actionDescription);
+
+            if (shouldContinue)
+                AppLogger.Warning($"User discarded unsaved changes to {actionDescription}.");
+
+            return shouldContinue;
+        }
+        private bool ShowDiscardUnsavedChangesDialog(string actionDescription)
+        {
             var choice = MessageBox.Show(this,
                 "You have unsaved registration changes.\n\n" +
                 $"If you continue, those changes will be discarded before you {actionDescription}.\n\n" +
@@ -476,12 +506,7 @@ namespace SMB4LeagueImportTool
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Warning);
 
-            bool shouldContinue = choice == DialogResult.Yes;
-
-            if (shouldContinue)
-                AppLogger.Warning($"User discarded unsaved changes to {actionDescription}.");
-
-            return shouldContinue;
+            return choice == DialogResult.Yes;
         }
         private bool TryGetSelectedLeagueInfoForExport(out LeagueRowInfo? info)
         {
@@ -509,7 +534,7 @@ namespace SMB4LeagueImportTool
                 return false;
             }
 
-            if (row.Tag is not LeagueRowInfo rowInfo)
+            if (!TryGetLeagueRowModelFromGridRow(row, out var rowModel) || rowModel is null)
             {
                 MessageBox.Show(this,
                     "The selected row does not have an associated save file.",
@@ -519,7 +544,22 @@ namespace SMB4LeagueImportTool
                 return false;
             }
 
-            info = rowInfo;
+            info = rowModel.Info;
+            return true;
+        }
+        private static bool TryGetLeagueRowModelFromGridRow(
+            DataGridViewRow? row,
+            out LeagueRowViewModel? rowModel)
+        {
+            rowModel = null;
+
+            if (row is null || row.IsNewRow)
+                return false;
+
+            if (row.Tag is not LeagueRowViewModel taggedRowModel)
+                return false;
+
+            rowModel = taggedRowModel;
             return true;
         }
         private void ApplySelectedSavesFolder(
@@ -547,15 +587,20 @@ namespace SMB4LeagueImportTool
 
             // Path is valid, but league data must still be loaded.
             _isDataLoaded = false;
-            _hasUnsavedChanges = false;
+            ClearUnsavedChangesState();
+        }
+        private bool HandleNoChangesToSave(LeagueRegistrationChangePlan changePlan)
+        {
+            if (changePlan.HasChanges)
+                return false;
 
-            UpdateUiState();
+            ShowNoChangesToSaveMessage();
+            return true;
         }
         private void ShowNoChangesToSaveMessage()
         {
             LeagueImportToolStatusLabel.Text = "No changes to save.";
-            _hasUnsavedChanges = false;
-            UpdateUiState();
+            ClearUnsavedChangesState();
 
             MessageBox.Show(this,
                 "There are no changes to save.",
@@ -585,15 +630,43 @@ namespace SMB4LeagueImportTool
                 newRegisteredGuids,
                 StringComparer.OrdinalIgnoreCase);
 
-            _hasUnsavedChanges = false;
-
             LeagueImportToolStatusLabel.Text =
                 "Saved changes successfully. A timestamped backup of master.sav was created.";
 
-            UpdateUiState();
+            ClearUnsavedChangesState();
         }
-        private bool ShowMissingCheckedSavesWarningIfNeeded(
-            IReadOnlyList<LeagueRowInfo> missingCheckedSaves)
+        private void SaveRegistrationChangesWithErrorHandling(
+            IReadOnlyList<string> newRegisteredGuids,
+            int newRegisteredCount)
+        {
+            try
+            {
+                MasterLeagueRegistry.RewriteRegisteredGuids(
+                    _savesFolderPath!,
+                    newRegisteredGuids);
+
+                AppLogger.Info("Save operation completed successfully.");
+
+                ApplySuccessfulSaveState(
+                    newRegisteredGuids,
+                    newRegisteredCount);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Save failed while updating master.sav.", ex);
+
+                if (!TryHandleSqliteInitError(ex))
+                {
+                    MessageBox.Show(this,
+                        "An error occurred while saving changes to master.sav:\n\n" + ex.Message,
+                        "Save Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+        private bool ShouldCancelSaveDueToMissingCheckedSaves(
+            List<LeagueRowInfo> missingCheckedSaves)
         {
             if (missingCheckedSaves.Count == 0)
                 return false;
@@ -622,82 +695,123 @@ namespace SMB4LeagueImportTool
             return true;
         }
         private void ShowFilenameRepairResults(
-    IReadOnlyList<(string OldName, string NewName, string LeagueName)> renamedSaves,
-    IReadOnlyList<(string OldName, string CorrectName, string LeagueName)> skippedRenames,
-    IReadOnlyList<(string FileName, string Reason)> failedRenames)
+            IReadOnlyList<(string OldName, string NewName, string LeagueName)> renamedSaves,
+            IReadOnlyList<(string OldName, string CorrectName, string LeagueName)> skippedRenames,
+            IReadOnlyList<(string FileName, string Reason)> failedRenames)
         {
-            if (renamedSaves.Count > 0)
+            ShowRenamedSavesMessage(renamedSaves);
+            ShowSkippedFilenameRepairsMessage(skippedRenames);
+            ShowFailedFilenameRepairsMessage(failedRenames);
+        }
+
+        private void ShowRenamedSavesMessage(
+            IReadOnlyList<(string OldName, string NewName, string LeagueName)> renamedSaves)
+        {
+            if (renamedSaves.Count == 0)
+                return;
+
+            var sb = new StringBuilder();
+
+            sb.AppendLine("One or more league save files had filenames that didn't match");
+            sb.AppendLine("their internal IDs. The tool normalized them so the game and");
+            sb.AppendLine("other tools can recognize them reliably.");
+            sb.AppendLine();
+            sb.AppendLine("Renamed saves:");
+            sb.AppendLine();
+
+            foreach (var (oldName, newName, leagueName) in
+                     renamedSaves.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
             {
-                var sb = new StringBuilder();
-
-                sb.AppendLine("One or more league save files had filenames that didn't match");
-                sb.AppendLine("their internal IDs. The tool normalized them so the game and");
-                sb.AppendLine("other tools can recognize them reliably.");
-                sb.AppendLine();
-                sb.AppendLine("Renamed saves:");
-                sb.AppendLine();
-
-                foreach (var (oldName, newName, leagueName) in
-                         renamedSaves.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
-                {
-                    sb.AppendLine($"{oldName} → {newName}   ({leagueName})");
-                }
-
-                MessageBox.Show(
-                    this,
-                    sb.ToString(),
-                    "League Save Filenames Normalized",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                sb.AppendLine($"{oldName} → {newName}   ({leagueName})");
             }
 
-            if (skippedRenames.Count > 0)
+            MessageBox.Show(
+                this,
+                sb.ToString(),
+                "League Save Filenames Normalized",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+
+        private void ShowSkippedFilenameRepairsMessage(
+            IReadOnlyList<(string OldName, string CorrectName, string LeagueName)> skippedRenames)
+        {
+            if (skippedRenames.Count == 0)
+                return;
+
+            var sb = new StringBuilder();
+
+            sb.AppendLine("One or more league save files had filenames that did not match their internal IDs.");
+            sb.AppendLine("You chose not to repair them during this load.");
+            sb.AppendLine();
+            sb.AppendLine("Skipped repairs:");
+            sb.AppendLine();
+
+            foreach (var (oldName, correctName, leagueName) in
+                     skippedRenames.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
             {
-                var sb = new StringBuilder();
-
-                sb.AppendLine("One or more league save files had filenames that did not match their internal IDs.");
-                sb.AppendLine("You chose not to repair them during this load.");
-                sb.AppendLine();
-                sb.AppendLine("Skipped repairs:");
-                sb.AppendLine();
-
-                foreach (var (oldName, correctName, leagueName) in
-                         skippedRenames.OrderBy(r => r.LeagueName, StringComparer.OrdinalIgnoreCase))
-                {
-                    sb.AppendLine($"{oldName} → {correctName}   ({leagueName})");
-                }
-
-                MessageBox.Show(
-                    this,
-                    sb.ToString(),
-                    "League Save Filename Repair Skipped",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                sb.AppendLine($"{oldName} → {correctName}   ({leagueName})");
             }
 
-            if (failedRenames.Count > 0)
+            MessageBox.Show(
+                this,
+                sb.ToString(),
+                "League Save Filename Repair Skipped",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+
+        private void ShowFailedFilenameRepairsMessage(
+            IReadOnlyList<(string FileName, string Reason)> failedRenames)
+        {
+            if (failedRenames.Count == 0)
+                return;
+
+            var sb = new StringBuilder();
+
+            sb.AppendLine("One or more league save files could not be renamed to match their internal IDs.");
+            sb.AppendLine("These files were loaded as-is and may not register correctly.");
+            sb.AppendLine();
+            sb.AppendLine("Failed renames:");
+            sb.AppendLine();
+
+            foreach (var (fileName, reason) in
+                     failedRenames.OrderBy(r => r.FileName, StringComparer.OrdinalIgnoreCase))
             {
-                var sb = new StringBuilder();
-
-                sb.AppendLine("One or more league save files could not be renamed to match their internal IDs.");
-                sb.AppendLine("These files were loaded as-is and may not register correctly.");
-                sb.AppendLine();
-                sb.AppendLine("Failed renames:");
-                sb.AppendLine();
-
-                foreach (var (fileName, reason) in
-                         failedRenames.OrderBy(r => r.FileName, StringComparer.OrdinalIgnoreCase))
-                {
-                    sb.AppendLine($"{fileName}: {reason}");
-                }
-
-                MessageBox.Show(
-                    this,
-                    sb.ToString(),
-                    "League Save Rename Failed",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                sb.AppendLine($"{fileName}: {reason}");
             }
+
+            MessageBox.Show(
+                this,
+                sb.ToString(),
+                "League Save Rename Failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+        private bool TryBlockIfSmb4IsRunning(string attemptedAction)
+        {
+            if (!Smb4GameProcessDetector.TryFindRunningGame(out var processInfo) ||
+                processInfo is null)
+            {
+                return false;
+            }
+
+            AppLogger.Warning(
+                $"Blocked '{attemptedAction}' because Super Mega Baseball 4 appears to be running. " +
+                $"Detected {processInfo.DisplayText}.");
+
+            MessageBox.Show(
+                this,
+                "Super Mega Baseball 4 appears to be running.\n\n" +
+                "Close the game before using this tool. SMB4 loads .sav files into memory on startup, " +
+                "so editing save files while the game is open can cause your changes to be ignored or overwritten later.\n\n" +
+                $"Detected process: {processInfo.DisplayText}\n\n" +
+                $"Close SMB4, then try to {attemptedAction} again.",
+                "Super Mega Baseball 4 Is Running",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+
+            return true;
         }
         private void MaybeWarnSteamCloud(string savesFolderPath)
         {
@@ -763,25 +877,31 @@ namespace SMB4LeagueImportTool
             }
             return false;
         }
-        private void AddLeagueRowToGrid(LeagueRowInfo info)
+        private void AddLeagueRowToGrid(LeagueRowViewModel rowModel)
         {
             int rowIndex = DGVLeagues.Rows.Add(
-                info.IsRegistered,
-                info.Type,
-                info.Name,
-                info.DisplayGuid,
-                info.SaveFileName);
+                rowModel.IsRegistered,
+                rowModel.Info.Kind.ToDisplayText(),
+                rowModel.Info.Name,
+                rowModel.Info.DisplayGuid,
+                rowModel.Info.SaveFileName);
 
             var row = DGVLeagues.Rows[rowIndex];
 
-            row.Tag = info; // This is so Save/Export can reconstruct GUIDs and file names
+            row.Tag = rowModel; // This is so Save/Export can reconstruct GUIDs and file names
 
-            if (LeagueGuidHelper.IsDefaultLeagueGuidRaw(info.RawGuidHex))
-            {
-                row.ReadOnly = true;
-                row.DefaultCellStyle.BackColor = System.Drawing.Color.Gainsboro;
-                row.DefaultCellStyle.ForeColor = System.Drawing.Color.DimGray;
-            }
+            ApplyLeagueRowStyle(row, rowModel);
+        }
+        private static void ApplyLeagueRowStyle(
+            DataGridViewRow row,
+            LeagueRowViewModel rowModel)
+        {
+            if (!rowModel.IsDefaultLeague)
+                return;
+
+            row.ReadOnly = true;
+            row.DefaultCellStyle.BackColor = System.Drawing.Color.Gainsboro;
+            row.DefaultCellStyle.ForeColor = System.Drawing.Color.DimGray;
         }
         private bool AskToRepairFilenameMismatch(
             LeagueFilenameMismatchInfo mismatch,
@@ -792,6 +912,10 @@ namespace SMB4LeagueImportTool
                 var choice = MessageBox.Show(
                     this,
                     "One or more league/franchise save files have filenames that do not match their internal IDs.\n\n" +
+                    "Example mismatch:\n" +
+                    $"League/Franchise: {mismatch.LeagueName}\n" +
+                    $"Current filename: {mismatch.OldName}\n" +
+                    $"Expected filename: {mismatch.CorrectName}\n\n" +
                     "This can happen when a save was copied, renamed, exported, or shared manually.\n\n" +
                     "Repairing the filename helps SMB4 and related tools recognize the save reliably.\n\n" +
                     "Do you want this tool to repair mismatched league save filenames now?\n\n" +
@@ -805,31 +929,30 @@ namespace SMB4LeagueImportTool
 
             return repairFilenameMismatchesThisLoad == true;
         }
-        private List<LeagueRowInfo> GetCurrentGridLeagueRows()
+        private List<(LeagueRowViewModel RowModel, bool IsRegistered)> GetCurrentGridLeagueRows()
         {
-            var rows = new List<LeagueRowInfo>();
+            var rows = new List<(LeagueRowViewModel RowModel, bool IsRegistered)>();
 
             foreach (DataGridViewRow row in DGVLeagues.Rows)
             {
-                if (row.IsNewRow)
+                if (!TryGetLeagueRowModelFromGridRow(row, out var rowModel) || rowModel is null)
                     continue;
 
-                if (row.Tag is not LeagueRowInfo info)
-                    continue;
-
-                bool isRegistered = false;
-
-                if (row.Cells[ColRegistered.Index].Value is bool checkedValue)
-                    isRegistered = checkedValue;
-
-                info.IsRegistered = isRegistered;
-                rows.Add(info);
+                rows.Add((rowModel, GetRegisteredCellValue(row)));
             }
 
             return rows;
         }
+        private bool GetRegisteredCellValue(DataGridViewRow row)
+        {
+            return row.Cells[ColRegistered.Index].Value is bool checkedValue &&
+                   checkedValue;
+        }
         private void ExportSaveButton_Click(object? sender, EventArgs e)
         {
+            if (TryBlockIfSmb4IsRunning("export a save file"))
+                return;
+
             if (!TryGetSelectedLeagueInfoForExport(out var info) || info is null)
                 return;
 
@@ -904,10 +1027,10 @@ namespace SMB4LeagueImportTool
         }
         private void QuitButton_Click(object? sender, EventArgs e)
         {
-            // Let the user know something is happening before we close
+            // Let the user know something is happening before we close.
             LeagueImportToolStatusLabel.Text = "Doing some cleanup...";
-            LeagueImportToolStatusLabel.Invalidate();
-            Application.DoEvents();
+            // Refresh the StatusStrip so the status label update renders before Close() is called.
+            LeagueImportToolStatusLabel.Owner?.Refresh();
 
             Close(); // triggers FormClosing → CleanupTempFolder()
         }

@@ -18,23 +18,19 @@ namespace SMB4LeagueImportTool.Core
 
             string[] leagueSaveFiles = Directory.GetFiles(
                 savesFolderPath,
-                "league-*.sav",
+                Smb4SaveConstants.LeagueSaveSearchPattern,
                 SearchOption.TopDirectoryOnly);
 
             AppLogger.Info($"Detected {leagueSaveFiles.Length} league-*.sav file(s).");
 
-            var result = new LeagueImportLoadResult
-            {
-                LeagueSaveFileCount = leagueSaveFiles.Length,
-                HasLeagueSaveFiles = leagueSaveFiles.Length > 0
-            };
-
             if (leagueSaveFiles.Length == 0)
             {
-                result.StatusText =
-                    "master.sav found, but no league-*.sav files were detected.";
-
-                return result;
+                return new LeagueImportLoadResult
+                {
+                    LeagueSaveFileCount = leagueSaveFiles.Length,
+                    HasLeagueSaveFiles = false,
+                    StatusText = "master.sav found, but no league-*.sav files were detected."
+                };
             }
 
             var registeredGuids = MasterLeagueRegistry.ReadRegisteredGuids(savesFolderPath);
@@ -48,7 +44,12 @@ namespace SMB4LeagueImportTool.Core
                 scanResult.LeagueInfos,
                 registeredGuids);
 
-            result.DisplayBuild = displayBuild;
+            var result = new LeagueImportLoadResult
+            {
+                LeagueSaveFileCount = leagueSaveFiles.Length,
+                HasLeagueSaveFiles = true,
+                DisplayBuild = displayBuild
+            };
 
             result.RenamedSaves.AddRange(scanResult.RenamedSaves);
             result.SkippedRenames.AddRange(scanResult.SkippedRenames);

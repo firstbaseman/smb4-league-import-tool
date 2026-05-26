@@ -1,18 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace SMB4LeagueImportTool.Models
+﻿namespace SMB4LeagueImportTool.Models
 {
     public sealed class LeagueImportLoadResult
     {
-        public bool HasLeagueSaveFiles { get; set; }
+        public bool HasLeagueSaveFiles { get; init; }
 
-        public int LeagueSaveFileCount { get; set; }
+        public int LeagueSaveFileCount { get; init; }
 
-        public string StatusText { get; set; } = string.Empty;
+        public string StatusText { get; init; } = string.Empty;
 
-        public LeagueDisplayBuildResult? DisplayBuild { get; set; }
+        public LeagueDisplayBuildResult? DisplayBuild { get; init; }
 
         public List<(string OldName, string NewName, string LeagueName)> RenamedSaves { get; } = new();
 

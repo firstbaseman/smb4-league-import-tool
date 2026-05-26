@@ -131,6 +131,9 @@ namespace SMB4LeagueImportTool.Core
                    path.StartsWith("/", StringComparison.Ordinal);
         }
 
+        // Note: Path.Combine is intentionally not used here.
+        // Under Wine/Proton, this app still runs as a Windows .NET process,
+        // so Path.Combine would use backslashes even when constructing Unix-style paths.
         private static string CombineUnixPath(params string[] parts)
         {
             return string.Join(

@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace SMB4LeagueImportTool.Models
+﻿namespace SMB4LeagueImportTool.Models
 {
     public sealed class LeagueSaveScanResult
     {

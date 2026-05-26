@@ -2,8 +2,6 @@
 {
     public static class SteamCloudDetector
     {
-        private const string SteamAutoCloudFileName = "steam_autocloud.vdf";
-
         public static bool IsDetected(string? savesFolderPath)
         {
             if (string.IsNullOrWhiteSpace(savesFolderPath))

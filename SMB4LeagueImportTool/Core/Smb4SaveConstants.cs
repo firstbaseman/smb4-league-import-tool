@@ -1,8 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace SMB4LeagueImportTool.Core
+﻿namespace SMB4LeagueImportTool.Core
 {
     public static class Smb4SaveConstants
     {
@@ -21,5 +17,9 @@ namespace SMB4LeagueImportTool.Core
         public const string SteamAutoCloudFileName = "steam_autocloud.vdf";
 
         public const string LegacyTempFolderName = "_smb4_temp";
+
+        public const string GameExecutableFileName = "supermegabaseball.exe";
+
+        public const string GameProcessName = "supermegabaseball";
     }
 }

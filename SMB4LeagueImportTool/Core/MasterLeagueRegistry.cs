@@ -19,11 +19,10 @@ namespace SMB4LeagueImportTool.Core
 
             var registeredGuids = new List<string>();
 
-            using var savManager = new SavManager(savesFolderPath);
+            using var savManager = new SavManager();
             string masterSqlitePath = savManager.DecompressSavToTemp(masterSavPath);
 
-            using var conn = new SqliteConnection(
-                $"Data Source={masterSqlitePath};Mode=ReadOnly;Pooling=False;");
+            using var conn = SqliteConnectionFactory.CreateReadOnly(masterSqlitePath);
 
             conn.Open();
 
@@ -37,13 +36,13 @@ namespace SMB4LeagueImportTool.Core
             {
                 string rawHex = reader.IsDBNull(0)
                     ? string.Empty
-                    : reader.GetString(0).ToUpperInvariant();
+                    : LeagueGuidHelper.NormalizeRawGuidHex(reader.GetString(0));
 
                 int isMissing = reader.IsDBNull(1)
                     ? 0
                     : reader.GetInt32(1);
 
-                if (string.IsNullOrWhiteSpace(rawHex))
+                if (!LeagueGuidHelper.IsValidRawGuidHex(rawHex))
                     continue;
 
                 // SMB4 treats missing entries as invalid; do not treat them as registered.
@@ -75,15 +74,15 @@ namespace SMB4LeagueImportTool.Core
                 throw new FileNotFoundException("master.sav was not found.", masterSavPath);
 
             var normalizedGuids = rawGuidHexValues
-                .Where(g => !string.IsNullOrWhiteSpace(g))
-                .Select(g => g.Trim().ToUpperInvariant())
+                .Select(LeagueGuidHelper.NormalizeRawGuidHex)
+                .Where(LeagueGuidHelper.IsValidRawGuidHex)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            using var savManager = new SavManager(savesFolderPath);
+            using var savManager = new SavManager();
             string tempSqlitePath = savManager.DecompressSavToTemp(masterSavPath);
 
-            using (var conn = new SqliteConnection(
-                       $"Data Source={tempSqlitePath};Pooling=False;"))
+            using (var conn = SqliteConnectionFactory.CreateReadWrite(tempSqlitePath))
             {
                 conn.Open();
 
